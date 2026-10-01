@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-test-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: native-test-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   static:
@@ -74,22 +74,6 @@ jobs:
             --package-path macos \
             --scratch-path "$SWIFT_SCRATCH_PATH" \
             MeetingTranscriberCoreChecks
-      - name: Require real Apple Speech and Translation evidence
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          WHEREWE_NATIVE_REAL_APPLE_SPEECH: '1'
-          WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: '1'
-        run: |
-          set -euo pipefail
-          EVIDENCE_LOG="$RUNNER_TEMP/apple-runtime-evidence.log"
-          xcrun swift test \
-            --package-path macos \
-            --scratch-path "$SWIFT_SCRATCH_PATH" \
-            --filter NativeRuntimeIntegrationTests \
-            2>&1 | /usr/bin/tee "$EVIDENCE_LOG"
-          for marker in apple-speech-accurate apple-speech-commit-boundary apple-translation; do
-            /usr/bin/grep -Fq "WHEREWE_RUNTIME_EVIDENCE $marker" "$EVIDENCE_LOG"
-          done
       - name: Build native app
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: bash scripts/build-macos-app.sh
@@ -99,5 +83,51 @@ jobs:
       - name: Build and mount-verify DMG
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
+          set -euo pipefail
           bash scripts/build-macos-dmg.sh
           bash scripts/test-macos-dmg.sh
+          shopt -s nullglob
+          dmg_candidates=("$WHEREWE_DMG_OUTPUT_DIR"/Wherewe-*-arm64.dmg)
+          shopt -u nullglob
+          [[ "${#dmg_candidates[@]}" -eq 1 ]] || {
+            echo 'Expected exactly one verified test DMG.' >&2
+            exit 1
+          }
+          source_path="${dmg_candidates[0]}"
+          test_path="${source_path%.dmg}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}.dmg"
+          /bin/mv "$source_path" "$test_path"
+      - name: Upload downloadable test DMG
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        id: upload-test-dmg
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: ${{ env.WHEREWE_DMG_OUTPUT_DIR }}/Wherewe-*-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}.dmg
+          if-no-files-found: error
+          retention-days: 7
+          archive: false
+      - name: Publish test DMG download details
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.upload-test-dmg.outcome == 'success' }}
+        run: |
+          {
+            echo '## Downloadable test DMG'
+            echo
+            echo '[Download the test DMG](${{ steps.upload-test-dmg.outputs.artifact-url }})'
+            echo
+            echo 'Artifact SHA-256: `${{ steps.upload-test-dmg.outputs.artifact-digest }}`'
+            echo
+            echo 'Source: `${{ github.ref_name }} @ ${{ github.sha }}`'
+            echo
+            echo 'GitHub sign-in is required. This is an unsigned, non-notarized DMG containing an ad-hoc-signed app.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Probe available Apple runtime assets
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'
+          WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'
+        run: |
+          xcrun swift test \
+            --package-path macos \
+            --scratch-path "$SWIFT_SCRATCH_PATH" \
+            --filter NativeRuntimeIntegrationTests

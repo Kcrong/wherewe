@@ -54,11 +54,15 @@ test("testing guide matches the executable Apple-only inventory", () => {
     assert.ok(swiftSource.includes(`NativeRuntimeEvidence.record("${marker}")`));
     assert.ok(guide.includes(`\`${marker}\``), `guide missing evidence marker ${marker}`);
   }
-  for (const source of [localGate, releaseGate, testWorkflow]) {
+  for (const source of [localGate, releaseGate]) {
     for (const marker of evidenceMarkers.slice(0, 3)) {
       assert.ok(source.includes(marker), `required gate missing ${marker}`);
     }
   }
+  assert.match(testWorkflow, /name: Probe available Apple runtime assets/);
+  assert.match(testWorkflow, /WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'/);
+  assert.match(testWorkflow, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'/);
+  assert.match(testWorkflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
 
   assert.ok(guide.includes(`Swift test sources: ${swiftFiles.length} files, ${swiftSuites} suites, ${swiftTests} declared tests.`));
   assert.ok(guide.includes(`Deterministic Swift baseline: ${swiftTests - gatedTests} tests.`));
