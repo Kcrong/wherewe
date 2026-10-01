@@ -70,9 +70,9 @@ Repository security, privacy, and strategy contracts:
 | Profile | Required evidence |
 | --- | --- |
 | Pull request and `main` push | Linux syntax/scanner/contracts followed by macOS 26 ARM64 Swift build, unit tests, and core checks |
-| Manual Test dispatch | Automatic evidence plus real Apple Speech and Translation, app launch/relaunch, and DMG mount verification |
-| Local pre-push gate | Same native evidence as manual Test plus clean-worktree checks before and after |
-| Release workflow | Pre-secret release gate, then Developer ID signing, notarisation, stapling, Gatekeeper assessment, checksum, and release upload |
+| Manual Test dispatch | Automatic evidence, an advisory Apple runtime probe, app launch/relaunch, DMG mount verification, and a directly downloadable `.dmg` artifact retained for 7 days |
+| Local pre-push gate | Deterministic tests plus required real Apple Speech and Translation evidence, app launch/relaunch, and DMG mount verification |
+| Release workflow | Pre-secret release gate with required real Apple runtime evidence, then Developer ID signing, notarisation, stapling, Gatekeeper assessment, checksum, and release upload |
 | Physical hardware run | Two explicit microphone/system-input route tests on a prepared Mac |
 
 The local gate is:
@@ -85,12 +85,18 @@ It selects external scratch storage from `KIROCREW_SCRATCH`, `RUNNER_TEMP`, or
 `TMPDIR`, in that order. No successful gate leaves build or runtime artifacts in
 the repository.
 
+A manually dispatched Test workflow produces an unsigned, non-notarized DMG
+containing an ad-hoc-signed app for hands-on validation. The workflow summary
+links directly to the `.dmg` and its SHA-256 digest; testers must be signed into
+GitHub. macOS may require an explicit Open action because this test artifact is
+not a signed release.
+
 ## Runtime evidence
 
 | Environment key | Tests | Scripted requirement |
 | --- | ---: | --- |
-| `WHEREWE_NATIVE_REAL_APPLE_SPEECH` | 2 | Required by local, manual macOS, and release gates |
-| `WHEREWE_NATIVE_REAL_APPLE_TRANSLATION` | 1 | Required by local, manual macOS, and release gates |
+| `WHEREWE_NATIVE_REAL_APPLE_SPEECH` | 2 | Required by local and release gates; manual Test uses advisory `auto` mode |
+| `WHEREWE_NATIVE_REAL_APPLE_TRANSLATION` | 1 | Required by local and release gates; manual Test uses advisory `auto` mode |
 | `WHEREWE_NATIVE_REAL_HARDWARE` | 2 | Explicit physical-Mac run only |
 
 Stable success markers:
@@ -101,8 +107,10 @@ Stable success markers:
 - `physical-dual-input`
 - `physical-system-only`
 
-The first three markers are required by every full macOS gate. A marker counts
-only when the filtered Swift command also exits successfully.
+The first three markers are required by local and release gates. Manual Test
+reports what the hosted runner can use but still packages the DMG when those
+assets are unavailable. A marker counts only when the filtered Swift command
+also exits successfully.
 
 ## Risk and evidence matrix
 
@@ -111,13 +119,14 @@ only when the filtered Swift command also exits successfully.
 | Repository source safety | Exact manifest, redacted scanner, identity and privacy contracts | Re-run on every change |
 | Meeting and SQLite behavior | Service, migration, mutation, translation, and core-check suites | Execute on supported macOS hardware |
 | CoreAudio and realtime ownership | Deterministic framing/synchronization suites and generation fencing | Hardware, TCC, route changes, unplug, and sleep/wake remain manual |
-| Apple Speech and Translation | Required generated-speech and installed-pack evidence | Host asset availability must be maintained |
+| Apple Speech and Translation | Advisory hosted probe plus required local/release generated-speech and installed-pack evidence | Test the downloadable DMG with installed assets on a real Mac |
 | Storage and attachments | Path-policy contracts plus security tests | Add user-facing permission-error coverage |
 | Export rollback | Collision and cancellation tests require complete partial-directory removal | Add destination-selection GUI coverage if introduced |
 | Retry and recovery | Translation restart and recording finalisation tests | Keep retries explicit and bounded |
-| Bundle and DMG | Architecture, minimum OS, signatures, entitlement, launch/relaunch, mounted layout, and payload rejection | Validate final Developer ID and notarised artifacts |
+| Bundle and DMG | Architecture, minimum OS, signatures, entitlement, launch/relaunch, mounted layout, payload rejection, and a 7-day direct test artifact | Validate final Developer ID and notarised artifacts |
 | Release secrets | Pre-secret release gate precedes every credential reference | Protect release environment and approvals |
 | Native UI | No XCUIAutomation target | Add deterministic onboarding, recording, file, glossary, and export flows |
 | Coverage | No coverage baseline | Add a stable risk-focused coverage threshold |
 
-This guide does not treat Linux source inspection as macOS runtime evidence.
+This guide does not treat Linux source inspection or an advisory hosted probe as
+required macOS runtime evidence.

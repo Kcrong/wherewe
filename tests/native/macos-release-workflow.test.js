@@ -20,22 +20,30 @@ function actionReferences(source) {
   return [...source.matchAll(/^\s*-?\s*uses:\s*(\S+)/gm)].map((match) => match[1]);
 }
 
+function namedStep(source, name) {
+  const marker = `      - name: ${name}\n`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing workflow step: ${name}`);
+  const next = source.indexOf("\n      - ", start + marker.length);
+  return source.slice(start, next === -1 ? source.length : next);
+}
+
 test("automatic CI runs Linux static then macOS build unit and core checks", () => {
   assert.match(ci, /push:\s*\n\s+branches: \[main\]/);
   assert.match(ci, /^\s{2}pull_request:\s*$/m);
   assert.match(ci, /^\s{2}workflow_dispatch:\s*$/m);
   assert.match(ci, /static:[\s\S]*runs-on: ubuntu-24\.04/);
   assert.match(ci, /macos:[\s\S]*needs: static[\s\S]*runs-on: macos-26/);
-  assert.match(ci, /name: Build Swift package[\s\S]*xcrun swift build/);
-  assert.match(ci, /name: Run Swift unit tests[\s\S]*xcrun swift test/);
-  assert.match(ci, /name: Run native service contract checks[\s\S]*MeetingTranscriberCoreChecks/);
-  assert.match(ci, /name: Require real Apple Speech and Translation evidence\n\s+if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
+  assert.match(namedStep(ci, "Build Swift package"), /xcrun swift build/);
+  assert.match(namedStep(ci, "Run Swift unit tests"), /xcrun swift test/);
+  assert.match(namedStep(ci, "Run native service contract checks"), /MeetingTranscriberCoreChecks/);
+  assert.match(namedStep(ci, "Probe available Apple runtime assets"), /if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
   assert.match(ci, /node scripts\/scan-public-content\.js/);
   assert.match(ci, /node --test tests\/native\/\*\.test\.js tests\/public\/\*\.test\.js/);
 });
 
-test("manual CI and local gates require real Apple runtime evidence", () => {
-  for (const source of [ci, localGate, releaseGate]) {
+test("manual CI publishes a mount-verified test DMG without requiring host assets", () => {
+  for (const source of [localGate, releaseGate]) {
     assert.match(source, /WHEREWE_NATIVE_REAL_APPLE_SPEECH/);
     assert.match(source, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION/);
     assert.match(source, /apple-speech-accurate/);
@@ -43,6 +51,54 @@ test("manual CI and local gates require real Apple runtime evidence", () => {
     assert.match(source, /apple-translation/);
     assert.match(source, /NativeRuntimeIntegrationTests/);
   }
+
+  const buildStep = namedStep(ci, "Build native app");
+  const smokeStep = namedStep(ci, "Smoke-test clean launch and relaunch");
+  const dmgStep = namedStep(ci, "Build and mount-verify DMG");
+  const uploadStep = namedStep(ci, "Upload downloadable test DMG");
+  const summaryStep = namedStep(ci, "Publish test DMG download details");
+  const probeStep = namedStep(ci, "Probe available Apple runtime assets");
+  const orderedNames = [
+    "Build native app",
+    "Smoke-test clean launch and relaunch",
+    "Build and mount-verify DMG",
+    "Upload downloadable test DMG",
+    "Publish test DMG download details",
+    "Probe available Apple runtime assets",
+  ];
+  const indices = orderedNames.map((name) => ci.indexOf(`name: ${name}`));
+  assert.ok(indices.every((value, index) => index === 0 || value > indices[index - 1]));
+
+  for (const step of [buildStep, smokeStep, dmgStep, uploadStep]) {
+    assert.match(step, /if: \$\{\{ github\.event_name == 'workflow_dispatch' \}\}/);
+  }
+  assert.match(ci, /group: native-test-\$\{\{ github\.workflow \}\}-\$\{\{ github\.event_name \}\}-\$\{\{ github\.ref \}\}/);
+  assert.match(ci, /cancel-in-progress: \$\{\{ github\.event_name != 'workflow_dispatch' \}\}/);
+
+  assert.match(dmgStep, /bash scripts\/test-macos-dmg\.sh/);
+  assert.match(dmgStep, /dmg_candidates=/);
+  assert.match(dmgStep, /\$\{#dmg_candidates\[@\]\}.*-eq 1/);
+  assert.match(dmgStep, /GITHUB_RUN_ID/);
+  assert.match(dmgStep, /GITHUB_RUN_ATTEMPT/);
+
+  assert.match(uploadStep, /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1/);
+  assert.match(uploadStep, /path: \$\{\{ env\.WHEREWE_DMG_OUTPUT_DIR \}\}\/Wherewe-\*-arm64-run-\$\{\{ github\.run_id \}\}-attempt-\$\{\{ github\.run_attempt \}\}\.dmg/);
+  assert.match(uploadStep, /if-no-files-found: error/);
+  assert.match(uploadStep, /retention-days: 7/);
+  assert.doesNotMatch(uploadStep, /overwrite:/);
+  assert.match(uploadStep, /archive: false/);
+
+  assert.match(summaryStep, /steps\.upload-test-dmg\.outputs\.artifact-url/);
+  assert.match(summaryStep, /steps\.upload-test-dmg\.outputs\.artifact-digest/);
+  assert.match(summaryStep, /GitHub sign-in is required/);
+  assert.match(summaryStep, /unsigned, non-notarized DMG containing an ad-hoc-signed app/);
+
+  assert.match(probeStep, /continue-on-error: true/);
+  assert.match(probeStep, /timeout-minutes: 5/);
+  assert.match(probeStep, /WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'/);
+  assert.match(probeStep, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'/);
+  assert.match(probeStep, /--filter NativeRuntimeIntegrationTests/);
+  assert.doesNotMatch(ci, /name: Require real Apple Speech and Translation evidence/);
 });
 
 test("local and release gates keep artifacts outside the repository", () => {
