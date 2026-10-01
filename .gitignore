@@ -1,0 +1,22 @@
+.vscode/
+.env
+.env.*
+!.env.example
+.wherewe-config.json
+.transcriber-config.json
+op.env
+*.log
+data/
+.kiro/
+.DS_Store
+*.png
+
+# Local project direction documents
+north_star.md
+roadmap.md
+tasks.md
+.wherewe-public-loop.stop
+
+# Native macOS build outputs
+macos/.build/
+dist/macos/

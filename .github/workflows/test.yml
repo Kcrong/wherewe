@@ -1,0 +1,103 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check JavaScript and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for source in tests/native/*.test.js tests/public/*.test.js scripts/scan-public-content.js; do
+            node --check "$source"
+          done
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+      - name: Scan public content without printing matched values
+        run: node scripts/scan-public-content.js
+      - name: Run all static contracts
+        run: node --test tests/native/*.test.js tests/public/*.test.js
+
+  macos:
+    name: macOS build and tests
+    needs: static
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure isolated validation paths
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-runtime"
+          {
+            echo "KIROCREW_SCRATCH=$RUNNER_TEMP/native-runtime"
+            echo "SWIFT_SCRATCH_PATH=$RUNNER_TEMP/native-full-build"
+            echo "WHEREWE_NATIVE_BUILD_DIR=$RUNNER_TEMP/native-full-build"
+            echo "WHEREWE_NATIVE_DIST_DIR=$RUNNER_TEMP/native-full-dist"
+            echo "WHEREWE_NATIVE_APP_PATH=$RUNNER_TEMP/native-full-dist/Wherewe.app"
+            echo "WHEREWE_NATIVE_SMOKE_ROOT=$RUNNER_TEMP/native-app-smoke"
+            echo "WHEREWE_DMG_OUTPUT_DIR=$RUNNER_TEMP/native-dmg-dist"
+            echo "WHEREWE_DMG_BUILD_DIR=$RUNNER_TEMP/native-dmg-build"
+          } >> "$GITHUB_ENV"
+      - name: Build Swift package
+        run: |
+          xcrun swift build \
+            --package-path macos \
+            --scratch-path "$SWIFT_SCRATCH_PATH" \
+            --product Wherewe
+      - name: Run Swift unit tests
+        run: |
+          xcrun swift test \
+            --package-path macos \
+            --scratch-path "$SWIFT_SCRATCH_PATH"
+      - name: Run native service contract checks
+        run: |
+          xcrun swift run \
+            --package-path macos \
+            --scratch-path "$SWIFT_SCRATCH_PATH" \
+            MeetingTranscriberCoreChecks
+      - name: Require real Apple Speech and Translation evidence
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          WHEREWE_NATIVE_REAL_APPLE_SPEECH: '1'
+          WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: '1'
+        run: |
+          set -euo pipefail
+          EVIDENCE_LOG="$RUNNER_TEMP/apple-runtime-evidence.log"
+          xcrun swift test \
+            --package-path macos \
+            --scratch-path "$SWIFT_SCRATCH_PATH" \
+            --filter NativeRuntimeIntegrationTests \
+            2>&1 | /usr/bin/tee "$EVIDENCE_LOG"
+          for marker in apple-speech-accurate apple-speech-commit-boundary apple-translation; do
+            /usr/bin/grep -Fq "WHEREWE_RUNTIME_EVIDENCE $marker" "$EVIDENCE_LOG"
+          done
+      - name: Build native app
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: bash scripts/build-macos-app.sh
+      - name: Smoke-test clean launch and relaunch
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: bash scripts/test-macos-app-bundle.sh
+      - name: Build and mount-verify DMG
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          bash scripts/build-macos-dmg.sh
+          bash scripts/test-macos-dmg.sh
