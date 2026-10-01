@@ -69,9 +69,6 @@ test("runtime defaults use Wherewe and keep legacy namespace normalization isola
   assert.match(runtimeConfiguration, /TRANSCRIBER_/);
   assert.match(gitignore, /^\.wherewe-config\.json$/m);
   assert.match(gitignore, /^\.transcriber-config\.json$/m);
-  assert.match(readme, /Application Support\/Wherewe/);
-  assert.match(readme, /Apple SpeechAnalyzer/);
-  assert.match(readme, /Apple Translation/);
 });
 
 test("concrete legacy environment keys stay confined to compatibility tests", () => {

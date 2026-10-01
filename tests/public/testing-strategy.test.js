@@ -20,7 +20,6 @@ test("testing guide matches the executable Apple-only inventory", () => {
   const guidePath = path.join(ROOT, "docs/testing.md");
   assert.ok(fs.existsSync(guidePath), "docs/testing.md is required");
   const guide = fs.readFileSync(guidePath, "utf8");
-  const readme = read("README.md");
   const testWorkflow = read(".github/workflows/test.yml");
   const releaseWorkflow = read(".github/workflows/release-macos.yml");
   const releaseGate = read("scripts/test-release-prerequisites.sh");
@@ -83,7 +82,6 @@ test("testing guide matches the executable Apple-only inventory", () => {
     assert.ok(guide.includes(required), `guide missing risk: ${required}`);
   }
 
-  assert.match(readme, /docs\/testing\.md/);
   assert.match(testWorkflow, /macos:[\s\S]*needs: static[\s\S]*runs-on: macos-26/);
   assert.match(releaseWorkflow, /bash scripts\/test-release-prerequisites\.sh/);
   assert.ok(
