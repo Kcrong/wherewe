@@ -1,0 +1,343 @@
+import Foundation
+import Testing
+@testable import MeetingTranscriberCore
+
+@Suite("In-process Apple service")
+struct NativeServiceTests {
+    @Test("setup transitions to ready with canonical Apple settings")
+    func setupTransition() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+
+        let initial = try await service.health()
+        #expect(initial.state == .setupRequired)
+        #expect(!initial.realtimeAvailable)
+
+        var request = try await service.settings().document.updateRequest
+        request.user.name = "Native Tester"
+        request.user.profile = "Validates the in-process service."
+        request.transcription.engine = "retired"
+        request.transcription.local.provider = "retired"
+        request.transcription.local.model = "retired"
+        request.translation.provider = "retired"
+        let saved = try await service.updateSettings(request, etag: nil)
+
+        #expect(saved.document.configured)
+        #expect(saved.etag?.hasPrefix("\"settings-v1-") == true)
+        #expect(saved.document.transcription.engine == "apple")
+        #expect(saved.document.transcription.local.provider == "apple")
+        #expect(saved.document.transcription.local.model == "system")
+        #expect(saved.document.translation.provider == "apple")
+        #expect(try await service.transcriptionCatalogue().localProviders.map(\.id) == ["apple"])
+        #expect(try await service.health().state == .ready)
+        #expect(fixture.permissions(of: fixture.configURL) == 0o600)
+    }
+
+    @Test("legacy settings import keeps paths and normalizes retired selections")
+    func legacySettingsNormalization() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        let object: [String: Any] = [
+            "version": 1,
+            "transcription": [
+                "engine": "legacy",
+                "local": ["provider": "legacy", "model": "legacy", "apple": NSNull()],
+            ],
+            "translation": ["provider": "legacy"],
+            "user": [
+                "name": "Import Tester",
+                "role": "",
+                "organization": "",
+                "profile": "Validates compatibility normalization.",
+            ],
+            "paths": [
+                "database": fixture.databaseURL.path,
+                "files": fixture.filesURL.path,
+                "obsoleteOutput": fixture.root.appendingPathComponent("obsolete").path,
+            ],
+            "obsoleteModels": ["summary": "legacy"],
+        ]
+        let imported = try await service.importSettings(
+            JSONSerialization.data(withJSONObject: object),
+            etag: nil
+        )
+
+        #expect(imported.document.transcription.engine == "apple")
+        #expect(imported.document.transcription.local.provider == "apple")
+        #expect(imported.document.transcription.local.model == "system")
+        #expect(imported.document.transcription.local.apple == AppleSpeechSettings())
+        #expect(imported.document.translation.provider == "apple")
+        #expect(imported.document.paths.database == fixture.databaseURL.path)
+        #expect(imported.document.paths.files == fixture.filesURL.path)
+    }
+
+    @Test("meeting CRUD persists across service restart")
+    func meetingPersistence() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        var service: NativeService? = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service!)
+
+        let created = try await service!.createMeeting(CreateMeetingRequest(
+            title: "Wherewe workflow",
+            context: "Preserve the contract",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+        _ = try await service!.updateMeeting(
+            id: created.id,
+            request: UpdateMeetingRequest(title: "Wherewe workflow review", context: "Updated")
+        )
+        #expect(try await service!.meeting(id: created.id).title == "Wherewe workflow review")
+        service = nil
+
+        let restarted = makeTestService(configuration: fixture.configuration)
+        #expect(try await restarted.meetings().map(\.id) == [created.id])
+        #expect(try await restarted.meeting(id: created.id).context == "Updated")
+        #expect(fixture.permissions(of: fixture.databaseURL) == 0o600)
+        #expect(fixture.permissions(of: fixture.databaseCompanionURL("-wal")) == 0o600)
+        #expect(fixture.permissions(of: fixture.databaseCompanionURL("-shm")) == 0o600)
+
+        _ = try await restarted.deleteMeeting(id: created.id, socketID: nil)
+        #expect(try await restarted.meetings().isEmpty)
+    }
+
+    @Test("stale settings ETag is rejected")
+    func staleSettingsRevision() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        var request = try await service.settings().document.updateRequest
+        request.user.role = "Engineer"
+
+        await #expect(throws: NativeServiceError.self) {
+            _ = try await service.updateSettings(request, etag: "\"settings-v1-stale\"")
+        }
+    }
+
+    @Test("attachments glossary and export stay local and secure")
+    func workspacePersistenceAndExport() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(
+            title: "Workspace review",
+            context: "Local-only evidence",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+
+        let payload = Data("native document".utf8)
+        let upload = try await service.uploadDocument(meetingID: meeting.id, name: "검토.txt", data: payload)
+        #expect(try await service.documents(meetingID: meeting.id).first?.name == "검토.txt")
+        #expect(try await service.documentContent(id: upload.id).data == payload)
+
+        let term = try await service.createGlossary(GlossaryMutationRequest(
+            phrase: "release gate",
+            displayAs: "release gate",
+            language: "en"
+        ))
+        #expect(try await service.glossary(language: "en").map(\.id) == [term.id])
+
+        let exported = try await service.exportMeeting(id: meeting.id)
+        let root = URL(fileURLWithPath: exported.path, isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("meeting.json").path))
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("transcript.md").path))
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("background/context.md").path))
+        #expect(exported.files.attachments == ["background/files/검토.txt"])
+        #expect(try await service.reveal(path: exported.path).success)
+
+        #expect(try await service.deleteDocument(id: upload.id).success)
+        #expect(try await service.deleteGlossary(id: term.id).success)
+    }
+
+    @Test("recording persists Apple transcription and translation metadata")
+    func nativeRecordingRoundTrip() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Native recording"))
+        let realtime = NativeRealtimeClient(service: service)
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
+
+        let claim = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        #expect(claim.meetingID == meeting.id)
+        try await coordinator.sendPCM([Int16](repeating: 1, count: 1_600))
+        #expect(try await coordinator.stop().audioDeliveryConfirmed)
+
+        let restored = try await service.meeting(id: meeting.id)
+        #expect(restored.transcripts.count == 1)
+        #expect(restored.transcripts[0].text == "Hello world from deterministic speech.")
+        #expect(restored.transcripts[0].transcriptionEngine == "apple")
+        #expect(restored.transcripts[0].transcriptionProvider == "apple")
+        #expect(restored.transcripts[0].transcriptionModel == "system")
+        #expect(restored.transcripts[0].translation == "Translated: Hello world from deterministic speech.")
+        #expect(restored.transcripts[0].translationProvider == "apple")
+        #expect(restored.transcripts[0].translationStatus == .succeeded)
+        await coordinator.close()
+    }
+
+    @Test("recorded raw transcript can be edited through one upserted segment")
+    func manualSegmentEditing() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Manual edit"))
+        let realtime = NativeRealtimeClient(service: service)
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
+        _ = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        try await coordinator.sendPCM([Int16](repeating: 1, count: 1_600))
+        _ = try await coordinator.stop()
+
+        let raw = try #require(try await service.meeting(id: meeting.id).transcripts.first)
+        let first = try await service.editTranscript(
+            meetingID: meeting.id,
+            transcriptID: raw.id,
+            text: "Edited once"
+        )
+        #expect(first.segment.text == "Edited once")
+        #expect(first.segment.sourceIDs == [raw.resultID ?? "db:\(raw.id)"])
+        #expect(first.segment.corrections.last == SegmentCorrection(
+            from: "Hello world from deterministic speech.",
+            to: "Edited once",
+            reason: "manual"
+        ))
+        #expect(first.segment.translation == "Translated: Edited once")
+        #expect(first.segment.translationProvider == "apple")
+        #expect(first.segment.translationStatus == .succeeded)
+
+        let second = try await service.editTranscript(
+            meetingID: meeting.id,
+            transcriptID: raw.id,
+            text: "Edited twice"
+        )
+        let detail = try await service.meeting(id: meeting.id)
+        #expect(detail.segments.count == 1)
+        #expect(second.segment.id == first.segment.id)
+        #expect(second.segment.text == "Edited twice")
+        #expect(second.segment.translation == "Translated: Edited twice")
+        await coordinator.close()
+    }
+
+    @Test("long recording commits bounded chunks before stop")
+    func boundedRecordingChunks() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Chunked recording"))
+        let realtime = NativeRealtimeClient(service: service)
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
+        _ = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 8_000,
+            channelCount: 1
+        )
+        for _ in 0..<110 {
+            try await coordinator.sendPCM([Int16](repeating: 1, count: 800))
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        _ = try await coordinator.stop()
+        let transcripts = try await service.meeting(id: meeting.id).transcripts
+        #expect(transcripts.count == 2)
+        #expect(Set(transcripts.compactMap(\.resultID)).count == 2)
+        await coordinator.close()
+    }
+
+    @Test("corrupt settings are reported through health without terminating startup")
+    func corruptSettingsStartupFailure() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try Data("{not-valid-json".utf8).write(to: fixture.configURL)
+
+        let service = makeTestService(configuration: fixture.configuration)
+        await #expect(throws: NativeServiceError.server(
+            status: 500,
+            code: "SETTINGS_UNAVAILABLE",
+            message: "The settings file is unavailable."
+        )) {
+            _ = try await service.health()
+        }
+    }
+
+    @Test("corrupt database is reported through health without terminating startup")
+    func corruptDatabaseStartupFailure() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let settingsStore = NativeSettingsStore(configuration: fixture.configuration)
+        var request = settingsStore.initialDocument().updateRequest
+        request.user.name = "Native Tester"
+        request.user.profile = "Validates startup error handling."
+        _ = try settingsStore.update(request, etag: nil)
+        try Data("not-a-sqlite-database".utf8).write(to: fixture.databaseURL)
+
+        let service = makeTestService(configuration: fixture.configuration)
+        await #expect(throws: NativeSQLiteError.self) {
+            _ = try await service.health()
+        }
+    }
+}
+
+private struct Fixture {
+    let root: URL
+    let configURL: URL
+    let configuration: NativeServiceConfiguration
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("native-service-tests-\(UUID().uuidString)", isDirectory: true)
+        configURL = root.appendingPathComponent("config.json")
+        configuration = NativeServiceConfiguration(
+            configURL: configURL,
+            defaultDataRoot: root,
+            applicationVersion: "test",
+            environment: [
+                "WHEREWE_SUPPRESS_OPEN": "1",
+            ]
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    var databaseURL: URL { root.appendingPathComponent("data/meetings.db") }
+    var filesURL: URL { root.appendingPathComponent("data/files", isDirectory: true) }
+
+    func databaseCompanionURL(_ suffix: String) -> URL {
+        URL(fileURLWithPath: databaseURL.path + suffix)
+    }
+
+    func configure(_ service: NativeService) async throws {
+        var request = try await service.settings().document.updateRequest
+        request.user.name = "Native Tester"
+        request.user.profile = "Validates persistence."
+        _ = try await service.updateSettings(request, etag: nil)
+    }
+
+    func permissions(of url: URL) -> Int? {
+        let value = try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
+        return (value as? NSNumber)?.intValue
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
+    }
+}
