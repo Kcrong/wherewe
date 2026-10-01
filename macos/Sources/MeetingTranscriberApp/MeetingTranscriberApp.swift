@@ -4,6 +4,12 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum NativeLayoutMetrics {
+    static let setupPaneMinimumHeight: CGFloat = 260
+    static let setupPaneIdealHeight: CGFloat = 440
+    static let workspaceMinimumHeight: CGFloat = 280
+}
+
 @main
 struct MeetingTranscriberApp: App {
     @StateObject private var model = AppModel()
@@ -59,6 +65,7 @@ private struct RootView: View {
                     }
                 }
             }
+            .safeAreaPadding(.top)
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
             .navigationTitle("Meetings")
             .toolbar {
@@ -80,6 +87,7 @@ private struct RootView: View {
             }
         } detail: {
             detail
+                .safeAreaPadding(.top)
         }
         .task(id: model.selectedMeetingID) {
             await model.loadSelectedMeeting()
@@ -475,6 +483,59 @@ private struct MeetingDetailView: View {
     let meeting: MeetingSummary
 
     var body: some View {
+        VSplitView {
+            ScrollView(.vertical) {
+                meetingSetupContent
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .frame(
+                minHeight: NativeLayoutMetrics.setupPaneMinimumHeight,
+                idealHeight: NativeLayoutMetrics.setupPaneIdealHeight
+            )
+
+            WorkspacePane(model: model)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 16)
+                .frame(
+                    minHeight: NativeLayoutMetrics.workspaceMinimumHeight,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    Task { await model.saveMeetingDetails() }
+                } label: {
+                    Label("Save", systemImage: "checkmark")
+                }
+                .disabled(model.recordingPhase != .idle || model.meetingMutationInProgress)
+
+                Button(role: .destructive) {
+                    model.showingDeleteMeetingConfirmation = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(model.recordingPhase != .idle || model.meetingMutationInProgress)
+            }
+        }
+        .confirmationDialog(
+            "Delete this meeting and its attached files?",
+            isPresented: $model.showingDeleteMeetingConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Meeting", role: .destructive) {
+                Task { await model.deleteSelectedMeeting() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This cannot be undone.")
+        }
+    }
+
+    private var meetingSetupContent: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("Meeting title", text: $model.meetingTitleDraft)
@@ -509,43 +570,8 @@ private struct MeetingDetailView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Divider()
-            WorkspacePane(model: model)
-                .frame(minHeight: 0, maxHeight: .infinity)
-                .layoutPriority(1)
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    Task { await model.saveMeetingDetails() }
-                } label: {
-                    Label("Save", systemImage: "checkmark")
-                }
-                .disabled(model.recordingPhase != .idle || model.meetingMutationInProgress)
-
-                Button(role: .destructive) {
-                    model.showingDeleteMeetingConfirmation = true
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-                .disabled(model.recordingPhase != .idle || model.meetingMutationInProgress)
-            }
-        }
-        .confirmationDialog(
-            "Delete this meeting and its attached files?",
-            isPresented: $model.showingDeleteMeetingConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Meeting", role: .destructive) {
-                Task { await model.deleteSelectedMeeting() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This cannot be undone.")
-        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var recordingControls: some View {
