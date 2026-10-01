@@ -47,7 +47,7 @@ private enum MeetingTranscriberCoreChecks {
         try checks.expect(saved.document.transcription.local.model == "system", "transcription model was not normalized")
         try checks.expect(saved.document.translation.provider == "apple", "translation provider was not normalized")
 
-        let catalogue = try await service.transcriptionCatalogue()
+        let catalogue = try await service.transcriptionCatalogue(language: "en-US")
         try checks.expect(catalogue.localProviders.map(\.id) == ["apple"], "catalogue exposed a non-Apple provider")
 
         let created = try await service.createMeeting(CreateMeetingRequest(

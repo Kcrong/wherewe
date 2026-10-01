@@ -14,13 +14,35 @@ extension NativeService {
 
     public func recordingPreparation(meetingID: Int) async throws -> RecordingPreparation {
         let detail = try await meeting(id: meetingID)
+        return await speechPreparation(language: detail.language)
+    }
+
+    private func speechPreparation(language: String) async -> RecordingPreparation {
         let available = speechService.isAvailable()
+        let readiness: NativeSpeechReadiness
+        if available {
+            readiness = await speechService.readiness(language: language)
+        } else {
+            readiness = .unavailable
+        }
+        let languageLabel = nativeSpeechLanguageLabel(language)
+        let message: String?
+        switch readiness {
+        case .ready:
+            message = nil
+        case .installationRequired:
+            message = "Install \(languageLabel) Speech assets in Settings before recording."
+        case .unsupported:
+            message = "Apple SpeechAnalyzer does not support \(languageLabel)."
+        case .unavailable:
+            message = "Apple SpeechAnalyzer is unavailable for \(languageLabel) on this Mac."
+        }
         return RecordingPreparation(
-            state: available ? "ready" : "not-ready",
+            state: readiness == .ready ? "ready" : "not-ready",
             provider: "apple",
-            requestedLocale: detail.language,
-            message: available ? nil : "Apple SpeechAnalyzer is unavailable on this Mac.",
-            progress: available ? 1 : 0
+            requestedLocale: language,
+            message: message,
+            progress: readiness == .ready ? 1 : 0
         )
     }
 
@@ -47,7 +69,7 @@ extension NativeService {
             }
             throw NativeServiceError.server(status: 409, code: "RECORDING_ACTIVE", message: "Another recording is active.")
         }
-        let preparation = try await recordingPreparation(meetingID: meetingID)
+        let preparation = await speechPreparation(language: request.language)
         guard preparation.state == "ready" else {
             throw NativeServiceError.server(
                 status: 409,
@@ -55,19 +77,40 @@ extension NativeService {
                 message: preparation.message
             )
         }
-        recordingGeneration += 1
+        try Task.checkCancellation()
+        if let claim = recordingClaim {
+            if claim.meetingID == meetingID, claim.clientID == request.socketID {
+                return StartRecordingResponse(
+                    success: true,
+                    language: claim.language,
+                    engine: "apple",
+                    generation: claim.generation,
+                    provider: "apple",
+                    model: "system",
+                    mode: apple.mode,
+                    preparedLocale: claim.language,
+                    alreadyRecording: true
+                )
+            }
+            throw NativeServiceError.server(status: 409, code: "RECORDING_ACTIVE", message: "Another recording is active.")
+        }
+        let nextGeneration = recordingGeneration + 1
         let claim = NativeRecordingClaim(
             meetingID: meetingID,
-            generation: recordingGeneration,
+            generation: nextGeneration,
             clientID: request.socketID,
             language: request.language,
             translationTarget: canonicalLanguage(request.translationTarget)
         )
-        recordingClaim = claim
-        _ = try requireDatabase().run(
+        let update = try requireDatabase().run(
             "UPDATE meetings SET lang = ?, translate_to = ?, ended_at = NULL WHERE id = ?",
             [.text(request.language), .text(claim.translationTarget), .integer(Int64(meetingID))]
         )
+        guard update.changes == 1 else {
+            throw NativeServiceError.server(status: 404, code: "MEETING_NOT_FOUND", message: nil)
+        }
+        recordingGeneration = nextGeneration
+        recordingClaim = claim
         return StartRecordingResponse(
             success: true,
             language: request.language,

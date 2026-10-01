@@ -20,10 +20,14 @@ function between(source, start, end) {
 }
 
 test("recording ownership is revalidated after every persistence suspension", () => {
+  const start = between(recording, "public func startRecording(", "public func finalizeRecording(");
   const commit = between(recording, "func commitRealtimeChunk(", "func finishRealtimeTranscription(");
   const finish = between(recording, "func finishRealtimeTranscription(", "private func transcribe(");
   const persist = between(recording, "private func persistTranscription(", "private func deinterleaved(");
 
+  assert.match(start, /speechPreparation\(language: request\.language\)[\s\S]*APPLE_SPEECH_NOT_READY/);
+  assert.match(start, /Task\.checkCancellation\(\)[\s\S]*if let claim = recordingClaim/);
+  assert.match(start, /let update = try requireDatabase\(\)\.run[\s\S]*guard update\.changes == 1[\s\S]*recordingGeneration = nextGeneration[\s\S]*recordingClaim = claim/);
   assert.match(recording, /func requireCurrentRecordingClaim\(/);
   assert.match(commit, /await transcribe\([\s\S]*requireCurrentRecordingClaim\(/);
   assert.match(persist, /await translateText\([\s\S]*requireCurrentRecordingClaim\([\s\S]*INSERT INTO transcripts/);
