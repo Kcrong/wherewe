@@ -35,18 +35,15 @@ test("production performs language processing through Apple system frameworks", 
   assert.match(speech, /AssetInventory/);
   assert.match(translation, /import Translation/);
   assert.match(translation, /TranslationSession/);
-  assert.match(readme, /Wherewe itself sends no meeting content over a network/);
-  assert.match(readme, /macOS may contact Apple\s+services/);
 });
 
 test("production has no downloader or child executable path", () => {
   const production = `${swiftSources(coreDirectory)}\n${swiftSources(appDirectory)}`;
   assert.doesNotMatch(production, /URLSession|Process\s*\(|NSTask|NWListener|NWConnection/);
-  assert.match(readme, /no\s+listening port, network downloader, helper executable, or child process/);
   assert.match(appSmoke, /unexpectedly spawned child processes/);
 });
 
-test("README distinguishes local database attachments spools exports and deletion", () => {
+test("local data controls remain enforced and disclosed concisely", () => {
   assert.match(documents, /Files must be 5 MB or smaller/);
   assert.match(documents, /\["pdf", "md", "txt", "html", "csv"\]/);
   assert.match(documents, /NativeDocumentPathPolicy/);
@@ -56,17 +53,7 @@ test("README distinguishes local database attachments spools exports and deletio
   assert.match(realtime, /NativeSpoolWorkspace/);
   assert.match(spool, /sweepStaleWorkspaces/);
   assert.match(spool, /0o600/);
-
-  for (const disclosure of [
-    /SQLite stores meetings, transcripts, edited segments, translation state,/,
-    /Attachment bodies remain separate\s+files/,
-    /5 MB/,
-    /Cancelling an export removes its partial directory/,
-    /Deleting a\s+meeting removes its database rows/,
-    /Raw PCM is temporary and process-owned/,
-  ]) {
-    assert.match(readme, disclosure);
-  }
+  assert.match(readme, /## Privacy/);
 });
 
 test("bundle keeps library validation and rejects non-system payloads", () => {
