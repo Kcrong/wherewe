@@ -6,6 +6,8 @@ This document applies to all implementation and modification work within the rep
 
 - Do not push directly to the default branch (for example, `main` or `master`).
 - Create a feature branch from the latest default branch before modification work. (e.g. `feat/{changes}`)
+- When starting work, create the branch, make an empty commit, and open a pull request immediately.
+- Keep the pull request in a draft state while working, and convert it to "ready for review" only when it is prepared for review.
 - Explicitly name the feature branch when pushing.
 - Merge changes only through a pull request after review and required verification.
 - Address review findings and complete the relevant checks before merging.
