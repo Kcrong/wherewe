@@ -94,7 +94,8 @@ jobs:
           bash scripts/generate-release-notes.sh "$RELEASE_TAG" "$RELEASE_NOTES_PATH"
           echo "RELEASE_NOTES_PATH=$RELEASE_NOTES_PATH" >> "$GITHUB_ENV"
 
-      - name: Require release credentials
+      - name: Determine release signing mode
+        id: release-mode
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -102,19 +103,41 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
+          CONFIGURED_COUNT=0
           for name in \
             MACOS_CERTIFICATE_P12_BASE64 \
             MACOS_CERTIFICATE_PASSWORD \
             APPLE_ID \
             APPLE_TEAM_ID \
             APPLE_APP_SPECIFIC_PASSWORD; do
-            [[ -n "${!name:-}" ]] || {
-              echo "Required GitHub Actions secret is not configured: $name" >&2
-              exit 1
-            }
+            if [[ -n "${!name:-}" ]]; then
+              ((CONFIGURED_COUNT += 1))
+            fi
           done
+          case "$CONFIGURED_COUNT" in
+            0)
+              echo 'signed=false' >> "$GITHUB_OUTPUT"
+              echo 'RELEASE_SECURITY=ad-hoc test build' >> "$GITHUB_ENV"
+              WARNING_NOTES="$RUNNER_TEMP/wherewe-$RELEASE_TAG-notes-with-warning.md"
+              {
+                echo '> This draft contains an ad-hoc-signed and not notarized app for testing. Do not publish it as a production release.'
+                echo
+                cat "$RELEASE_NOTES_PATH"
+              } > "$WARNING_NOTES"
+              mv "$WARNING_NOTES" "$RELEASE_NOTES_PATH"
+              ;;
+            5)
+              echo 'signed=true' >> "$GITHUB_OUTPUT"
+              echo 'RELEASE_SECURITY=Developer ID signed and notarized' >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo 'Release signing secrets are partially configured; configure all five or remove all five.' >&2
+              exit 1
+              ;;
+          esac
 
       - name: Import Developer ID certificate
+        if: steps.release-mode.outputs.signed == 'true'
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -147,6 +170,7 @@ jobs:
           echo "WHEREWE_CODESIGN_IDENTITY=$WHEREWE_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Store and validate notarisation credentials
+        if: steps.release-mode.outputs.signed == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -160,21 +184,29 @@ jobs:
             --keychain "$KEYCHAIN_PATH" \
             --validate
 
-      - name: Build and verify Developer ID app
+      - name: Build and verify app
+        env:
+          SIGNED_RELEASE: ${{ steps.release-mode.outputs.signed }}
         run: |
           bash scripts/build-macos-app.sh
           bash scripts/test-macos-app-bundle.sh
-          /usr/bin/codesign -dv --verbose=4 "$WHEREWE_NATIVE_APP_PATH" 2>&1 \
-            | /usr/bin/grep -q 'Authority=Developer ID Application:'
-          /usr/bin/codesign -dv --verbose=4 "$WHEREWE_NATIVE_APP_PATH" 2>&1 \
-            | /usr/bin/grep -q 'flags=.*runtime'
+          if [[ "$SIGNED_RELEASE" == "true" ]]; then
+            /usr/bin/codesign -dv --verbose=4 "$WHEREWE_NATIVE_APP_PATH" 2>&1 \
+              | /usr/bin/grep -q 'Authority=Developer ID Application:'
+            /usr/bin/codesign -dv --verbose=4 "$WHEREWE_NATIVE_APP_PATH" 2>&1 \
+              | /usr/bin/grep -q 'flags=.*runtime'
+          else
+            /usr/bin/codesign -dv --verbose=4 "$WHEREWE_NATIVE_APP_PATH" 2>&1 \
+              | /usr/bin/grep -q 'Signature=adhoc'
+          fi
 
-      - name: Build and mount-verify signed DMG
+      - name: Build and mount-verify DMG
         run: |
           bash scripts/build-macos-dmg.sh
           bash scripts/test-macos-dmg.sh
 
       - name: Notarise and staple DMG
+        if: steps.release-mode.outputs.signed == 'true'
         run: |
           DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
           /usr/bin/xcrun notarytool submit "$WHEREWE_DMG_PATH" \
@@ -222,6 +254,8 @@ jobs:
             echo "[$RELEASE_TAG]($RELEASE_URL)"
             echo
             echo "Attached: \`$(basename "$WHEREWE_DMG_PATH")\` and \`$(basename "$CHECKSUM_PATH")\`"
+            echo
+            echo "Signing: $RELEASE_SECURITY"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Probe available Apple runtime assets

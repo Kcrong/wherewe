@@ -94,6 +94,6 @@ test("testing guide matches the executable Apple-only inventory", () => {
   assert.match(releaseWorkflow, /bash scripts\/test-release-prerequisites\.sh/);
   assert.ok(
     releaseWorkflow.indexOf("Run complete non-secret release gate")
-      < releaseWorkflow.indexOf("Require release credentials")
+      < releaseWorkflow.indexOf("Determine release signing mode")
   );
 });
