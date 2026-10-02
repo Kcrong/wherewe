@@ -3,7 +3,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "../..");
 const read = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
@@ -15,6 +17,7 @@ const dmgBuild = read("scripts/build-macos-dmg.sh");
 const dmgSmoke = read("scripts/test-macos-dmg.sh");
 const localGate = read("scripts/pre-push-macos.sh");
 const releaseGate = read("scripts/test-release-prerequisites.sh");
+const releaseNotes = read("scripts/generate-release-notes.sh");
 
 function actionReferences(source) {
   return [...source.matchAll(/^\s*-?\s*uses:\s*(\S+)/gm)].map((match) => match[1]);
@@ -43,14 +46,20 @@ test("automatic CI runs Linux static then macOS build unit and core checks", () 
 });
 
 test("manual CI publishes a mount-verified test DMG without requiring host assets", () => {
-  for (const source of [localGate, releaseGate]) {
-    assert.match(source, /WHEREWE_NATIVE_REAL_APPLE_SPEECH/);
-    assert.match(source, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION/);
-    assert.match(source, /apple-speech-accurate/);
-    assert.match(source, /apple-speech-commit-boundary/);
-    assert.match(source, /apple-translation/);
-    assert.match(source, /NativeRuntimeIntegrationTests/);
-  }
+  assert.match(localGate, /WHEREWE_NATIVE_REAL_APPLE_SPEECH/);
+  assert.match(localGate, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION/);
+  assert.match(localGate, /apple-speech-accurate/);
+  assert.match(localGate, /apple-speech-commit-boundary/);
+  assert.match(localGate, /apple-translation/);
+  assert.match(localGate, /NativeRuntimeIntegrationTests/);
+
+  const releaseProbeStep = namedStep(release, "Probe available Apple runtime assets");
+  assert.match(releaseProbeStep, /continue-on-error: true/);
+  assert.match(releaseProbeStep, /timeout-minutes: 5/);
+  assert.match(releaseProbeStep, /WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'/);
+  assert.match(releaseProbeStep, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'/);
+  assert.match(releaseProbeStep, /NativeRuntimeIntegrationTests/);
+  assert.doesNotMatch(releaseGate, /WHEREWE_NATIVE_REAL_APPLE_(?:SPEECH|TRANSLATION)|NativeRuntimeIntegrationTests/);
 
   const buildStep = namedStep(ci, "Build native app");
   const smokeStep = namedStep(ci, "Smoke-test clean launch and relaunch");
@@ -135,17 +144,82 @@ test("app and DMG packaging reject non-system payloads", () => {
   assert.match(appSmoke, /unexpectedly spawned child processes/);
 });
 
-test("release is tag-bound and publishes a versioned ARM64 DMG", () => {
+test("release is tag-bound and publishes a draft with commit-message notes and a versioned ARM64 DMG", () => {
   assert.match(release, /^\s{4}tags:\s*$/m);
   assert.match(release, /^\s{2}workflow_dispatch:\s*$/m);
   assert.match(release, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
-  assert.match(release, /TAG_COMMIT/);
-  assert.match(release, /current origin\/main commit/);
   assert.match(release, /Wherewe-\$RELEASE_VERSION-arm64\.dmg/);
   assert.match(release, /shasum -a 256/);
-  assert.match(release, /gh release (?:create|upload)/);
-  assert.match(release, /--verify-tag/);
-  assert.match(release, /--generate-notes/);
+  assert.match(release, /persist-credentials: false/);
+  assert.ok(release.includes("group: macos-release-${{ inputs.release_tag || github.ref_name }}"));
+
+  const validationIndex = release.indexOf("name: Validate release tag before repository scripts");
+  const gateIndex = release.indexOf("name: Run complete non-secret release gate");
+  const firstSecret = release.indexOf("${{ secrets.");
+  assert.ok(validationIndex >= 0 && validationIndex < gateIndex && gateIndex < firstSecret);
+  const validationStep = namedStep(release, "Validate release tag before repository scripts");
+  assert.match(validationStep, /git merge-base --is-ancestor "\$TAG_COMMIT" origin\/main/);
+  assert.match(validationStep, /current origin\/main history/);
+
+  const notesStep = namedStep(release, "Generate release notes from commit messages");
+  assert.match(notesStep, /bash scripts\/generate-release-notes\.sh "\$RELEASE_TAG" "\$RELEASE_NOTES_PATH"/);
+  assert.match(releaseNotes, /git rev-list --first-parent/);
+  assert.match(releaseNotes, /git tag --points-at "\$commit"/);
+  assert.match(releaseNotes, /git log --reverse --format=/);
+
+  const releaseStep = namedStep(release, "Create draft GitHub Release");
+  assert.match(releaseStep, /gh release create/);
+  assert.match(releaseStep, /--verify-tag/);
+  assert.match(releaseStep, /--notes-file "\$RELEASE_NOTES_PATH"/);
+  assert.match(releaseStep, /--draft/);
+  assert.match(releaseStep, /already exists; refusing to modify it/);
+  assert.doesNotMatch(releaseStep, /gh release (?:edit|upload)|--clobber|--generate-notes|--prerelease/);
+
+  const probeStep = namedStep(release, "Probe available Apple runtime assets");
+  assert.match(probeStep, /continue-on-error: true/);
+  assert.match(probeStep, /timeout-minutes: 5/);
+  assert.match(probeStep, /WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'/);
+  assert.match(probeStep, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'/);
+  assert.ok(release.indexOf("name: Create draft GitHub Release") < release.indexOf("name: Probe available Apple runtime assets"));
+});
+
+test("release notes use the nearest strict version tag and commit subjects", () => {
+  const scratchRoot = process.env.KIROCREW_SCRATCH || process.env.RUNNER_TEMP || os.tmpdir();
+  const repository = fs.mkdtempSync(path.join(scratchRoot, "wherewe-release-notes-"));
+  const git = (...args) => execFileSync("git", args, {
+    cwd: repository,
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" },
+  });
+  const commit = (subject) => {
+    fs.appendFileSync(path.join(repository, "history.txt"), `${subject}\n`);
+    git("add", "history.txt");
+    git("-c", "commit.gpgsign=false", "commit", "-m", subject);
+  };
+
+  try {
+    git("init", "-b", "main");
+    git("config", "user.name", "Release Test");
+    git("config", "user.email", "release-test@users.noreply.github.com");
+    commit("chore: oldest release");
+    git("-c", "tag.gpgSign=false", "tag", "v9.0.0");
+    commit("fix: nearest previous release");
+    git("-c", "tag.gpgSign=false", "tag", "v0.0.1");
+    commit("feat: current release change");
+    git("-c", "tag.gpgSign=false", "tag", "v0.0.2");
+
+    const output = path.join(repository, "release-notes.md");
+    execFileSync("bash", [path.join(ROOT, "scripts/generate-release-notes.sh"), "v0.0.2", output], {
+      cwd: repository,
+      env: process.env,
+    });
+    const notes = fs.readFileSync(output, "utf8");
+    assert.match(notes, /Commit messages since `v0\.0\.1`/);
+    assert.match(notes, /feat: current release change/);
+    assert.doesNotMatch(notes, /fix: nearest previous release|chore: oldest release|v9\.0\.0/);
+  } finally {
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test("signing and notarization credentials are used only after the non-secret gate", () => {

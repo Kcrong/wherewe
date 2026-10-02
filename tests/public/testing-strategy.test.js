@@ -54,11 +54,15 @@ test("testing guide matches the executable Apple-only inventory", () => {
     assert.ok(swiftSource.includes(`NativeRuntimeEvidence.record("${marker}")`));
     assert.ok(guide.includes(`\`${marker}\``), `guide missing evidence marker ${marker}`);
   }
-  for (const source of [localGate, releaseGate]) {
-    for (const marker of evidenceMarkers.slice(0, 3)) {
-      assert.ok(source.includes(marker), `required gate missing ${marker}`);
-    }
+  for (const marker of evidenceMarkers.slice(0, 3)) {
+    assert.ok(localGate.includes(marker), `required local gate missing ${marker}`);
   }
+  assert.doesNotMatch(releaseGate, /WHEREWE_NATIVE_REAL_APPLE_(?:SPEECH|TRANSLATION)|NativeRuntimeIntegrationTests/);
+  assert.match(
+    releaseWorkflow,
+    /name: Probe available Apple runtime assets[\s\S]{0,160}continue-on-error: true[\s\S]{0,80}timeout-minutes: 5[\s\S]{0,240}WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'[\s\S]{0,120}WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'/
+  );
+  assert.doesNotMatch(releaseGate, /required Apple runtime evidence is missing/);
   assert.match(testWorkflow, /name: Probe available Apple runtime assets/);
   assert.match(testWorkflow, /WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'/);
   assert.match(testWorkflow, /WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'/);

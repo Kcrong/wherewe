@@ -30,7 +30,6 @@ for required_tool in \
   /usr/bin/plutil \
   /usr/bin/python3 \
   /usr/bin/say \
-  /usr/bin/tee \
   /usr/bin/xcrun; do
   [[ -x "$required_tool" ]] || fail "required tool is unavailable: $required_tool"
 done
@@ -115,20 +114,6 @@ printf '%s\n' '==> Running native service core checks'
   --package-path "$PACKAGE_DIR" \
   --scratch-path "$WHEREWE_NATIVE_BUILD_DIR" \
   MeetingTranscriberCoreChecks
-
-printf '%s\n' '==> Running required Apple Speech and Translation evidence'
-APPLE_EVIDENCE_LOG="$RUN_ROOT/apple-runtime-evidence.log"
-WHEREWE_NATIVE_REAL_APPLE_SPEECH=1 \
-WHEREWE_NATIVE_REAL_APPLE_TRANSLATION=1 \
-/usr/bin/xcrun swift test \
-  --package-path "$PACKAGE_DIR" \
-  --scratch-path "$WHEREWE_NATIVE_BUILD_DIR" \
-  --filter NativeRuntimeIntegrationTests \
-  2>&1 | /usr/bin/tee "$APPLE_EVIDENCE_LOG"
-for marker in apple-speech-accurate apple-speech-commit-boundary apple-translation; do
-  /usr/bin/grep -Fq "WHEREWE_RUNTIME_EVIDENCE $marker" "$APPLE_EVIDENCE_LOG" \
-    || fail "required Apple runtime evidence is missing: $marker"
-done
 
 printf '%s\n' '==> Building and smoke-testing ad-hoc app and DMG'
 /bin/bash "$ROOT_DIR/scripts/build-macos-app.sh"
