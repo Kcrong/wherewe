@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const scanner = require("../../scripts/scan-public-content.js");
 
 const ROOT = path.resolve(__dirname, "../..");
 const model = fs.readFileSync(
@@ -52,10 +53,10 @@ test("Command-comma opens one system Settings window with current app state", ()
   const saveSettings = model.slice(saveStart, saveEnd);
 
   assert.equal((appScene.match(/\n\s*Settings \{/g) || []).length, 1);
-  assert.equal((appScene.match(/\n\s*SettingsView\(model: model\)/g) || []).length, 1);
+  assert.equal((appScene.match(/\n\s*SettingsView\(model: lifecycleDelegate\.model\)/g) || []).length, 1);
   assert.match(
     appScene,
-    /Settings \{\s*SettingsView\(model: model\)[\s\S]{0,120}\.task \{ await model\.loadSettings\(\) \}/
+    /Settings \{\s*SettingsView\(model: lifecycleDelegate\.model\)[\s\S]{0,120}\.task \{ await lifecycleDelegate\.model\.loadSettings\(\) \}/
   );
   assert.match(rootView, /@Environment\(\\\.openSettings\) private var openSettings/);
   assert.match(
@@ -177,4 +178,106 @@ test("native layout keeps adaptive system controls", () => {
     detailBody,
     /WorkspacePane\(model: model\)[\s\S]{0,240}minHeight: NativeLayoutMetrics\.workspaceMinimumHeight/
   );
+});
+
+
+test("application termination waits for recording finalization before replying", () => {
+  const delegateStart = view.indexOf("private final class AppLifecycleDelegate");
+  const appStart = view.indexOf("@main");
+  const shutdownStart = model.indexOf("func shutdown() async -> Bool {");
+  const shutdownEnd = model.indexOf("\n    private var preferredRecognitionLanguage", shutdownStart);
+  const startStart = model.indexOf("func startRecording() async {");
+  const startEnd = model.indexOf("\n    private func performStartRecording() async {", startStart);
+  const stopStart = model.indexOf("func stopRecording() async {");
+  const stopEnd = model.indexOf("\n    private func performStopRecording() async {", stopStart);
+  const retryStart = model.indexOf("func retryFinalization() async {");
+  const retryEnd = model.indexOf("\n    private func performRetryFinalization() async {", retryStart);
+  const cancelStart = model.indexOf("func cancelTerminationPreparation() {");
+  const cancelEnd = model.indexOf("\n    private var preferredRecognitionLanguage", cancelStart);
+
+  assert.notEqual(delegateStart, -1, "missing AppKit lifecycle delegate");
+  assert.ok(appStart > delegateStart, "lifecycle delegate must precede the app declaration");
+  assert.notEqual(shutdownStart, -1, "shutdown must return a termination decision");
+  assert.ok(shutdownEnd > shutdownStart, "missing shutdown boundary");
+  assert.notEqual(startStart, -1, "missing tracked recording start");
+  assert.ok(startEnd > startStart, "missing start implementation boundary");
+  assert.notEqual(stopStart, -1, "missing tracked recording stop");
+  assert.ok(stopEnd > stopStart, "missing stop implementation boundary");
+  assert.notEqual(retryStart, -1, "missing tracked finalization retry");
+  assert.ok(retryEnd > retryStart, "missing retry implementation boundary");
+  assert.notEqual(cancelStart, -1, "missing termination cancellation");
+  assert.ok(cancelEnd > cancelStart, "missing termination cancellation boundary");
+
+  const delegateSource = view.slice(delegateStart, appStart);
+  const delegate = scanner.swiftCodeOnly(delegateSource);
+  const appScene = scanner.swiftCodeOnly(view.slice(appStart, view.indexOf("private struct RootView")));
+  const shutdown = scanner.swiftCodeOnly(model.slice(shutdownStart, shutdownEnd));
+  const trackedStart = scanner.swiftCodeOnly(model.slice(startStart, startEnd));
+  const trackedStop = scanner.swiftCodeOnly(model.slice(stopStart, stopEnd));
+  const trackedRetry = scanner.swiftCodeOnly(model.slice(retryStart, retryEnd));
+  const cancellation = scanner.swiftCodeOnly(model.slice(cancelStart, cancelEnd));
+
+  assert.match(appScene, /@NSApplicationDelegateAdaptor\(AppLifecycleDelegate\.self\) private var lifecycleDelegate/);
+  assert.match(appScene, /RootView\(model: lifecycleDelegate\.model\)/);
+  assert.match(appScene, /SettingsView\(model: lifecycleDelegate\.model\)/);
+  assert.match(appScene, /RefreshMeetingsCommand\(model: lifecycleDelegate\.model\)/);
+  assert.match(appScene, /private struct RefreshMeetingsCommand: View \{[\s\S]*@ObservedObject var model: AppModel/);
+  assert.doesNotMatch(appScene, /willTerminateNotification|@StateObject[^\n]*AppModel/);
+
+  assert.match(delegate, /private static let terminationDeadline: Duration = \.seconds\(110\)/);
+  assert.match(delegate, /func applicationShouldTerminate\(_ sender: NSApplication\) -> NSApplication\.TerminateReply/);
+  assert.match(delegate, /guard terminationID == nil else \{ return \.terminateLater \}/);
+  assert.match(delegate, /Task\.sleep\(for: Self\.terminationDeadline\)/);
+  assert.match(delegate, /self\.model\.cancelTerminationPreparation\(\)/);
+  assert.match(delegate, /self\.completeTermination\(false, sender: sender, id: id\)/);
+  assert.match(delegate, /return \.terminateLater/);
+  const shutdownAwait = delegate.indexOf("let shouldTerminate = await self.model.shutdown()");
+  assert.ok(shutdownAwait >= 0);
+  assert.ok(delegate.indexOf("self.completeTermination(shouldTerminate", shutdownAwait) > shutdownAwait);
+  const terminationReplyCall = ["sender.", "rep", "ly(toApplicationShouldTerminate: shouldTerminate)"].join("");
+  assert.equal(delegate.split(terminationReplyCall).length - 1, 1);
+
+  assert.match(model, /private var recordingStartTask: Task<Void, Never>\?/);
+  assert.match(model, /private var recordingStopTask: Task<Void, Never>\?/);
+  assert.match(model, /private var recordingRetryTask: Task<Void, Never>\?/);
+  assert.match(model, /private var shutdownTask: Task<Bool, Never>\?/);
+  assert.match(model, /private var terminationRequested = false/);
+  assert.match(model, /&& !terminationRequested/);
+  assert.match(trackedStart, /if let recordingStartTask[\s\S]*await recordingStartTask\.value/);
+  assert.match(trackedStart, /recordingStartTask = task[\s\S]*await task\.value[\s\S]*recordingStartTask = nil/);
+  assert.match(trackedStop, /if let recordingStopTask[\s\S]*await recordingStopTask\.value/);
+  assert.match(trackedStop, /recordingStopTask = task[\s\S]*await task\.value[\s\S]*recordingStopTask = nil/);
+  assert.match(trackedRetry, /if let recordingRetryTask[\s\S]*await recordingRetryTask\.value/);
+  assert.match(trackedRetry, /guard !terminationRequested, recordingPhase == \.recoveryRequired/);
+  assert.match(trackedRetry, /recordingRetryTask = task[\s\S]*await task\.value[\s\S]*recordingRetryTask = nil/);
+
+  const orderedShutdown = [
+    "terminationRequested = true",
+    "await startTask.value",
+    "await stopTask.value",
+    "await retryTask.value",
+    "await self.stopRecording()",
+    "let coordinatorState = await self.coordinator.state",
+    "guard self.recordingPhase == .idle, coordinatorState == .idle",
+    "speechPreparationTask?.cancel()",
+    "realtimeEventTask?.cancel()",
+    "recordingTimerTask?.cancel()",
+    "captureStallTask?.cancel()",
+    "frameTask?.cancel()",
+  ];
+  let prior = -1;
+  for (const expression of orderedShutdown) {
+    const index = shutdown.indexOf(expression);
+    assert.ok(index > prior, `shutdown ordering is missing or invalid: ${expression}`);
+    prior = index;
+  }
+  assert.ok(shutdown.lastIndexOf("return true") > prior);
+  assert.match(shutdown, /let coordinatorState = await self\.coordinator\.state[\s\S]{0,180}if Task\.isCancelled \{[\s\S]{0,100}return false[\s\S]{0,120}guard self\.recordingPhase == \.idle/);
+  assert.match(shutdown, /guard self\.recordingPhase == \.idle, coordinatorState == \.idle else \{[\s\S]{0,140}return false/);
+  assert.doesNotMatch(shutdown, /coordinator\.close\(\)|api\.shutdown\(\)/);
+  assert.match(cancellation, /shutdownTask\?\.cancel\(\)[\s\S]{0,100}terminationRequested = false/);
+  const nestedCommentedReply = ["/* outer", "/* inner */", terminationReplyCall, "*/"].join("\n");
+  const rawStringifiedReply = ['let value = #"""', '"""', terminationReplyCall, '"""#'].join("\n");
+  assert.ok(!scanner.swiftCodeOnly(nestedCommentedReply).includes(terminationReplyCall));
+  assert.ok(!scanner.swiftCodeOnly(rawStringifiedReply).includes(terminationReplyCall));
 });

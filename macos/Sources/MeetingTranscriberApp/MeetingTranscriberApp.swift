@@ -1,4 +1,5 @@
 import AppKit
+import AppKit
 import MeetingTranscriberCore
 import PDFKit
 import SwiftUI
@@ -20,33 +21,75 @@ private extension NativePreferences.Theme {
     }
 }
 
+@MainActor
+private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
+    let model = AppModel()
+    private static let terminationDeadline: Duration = .seconds(110)
+    private var terminationTask: Task<Void, Never>?
+    private var terminationDeadlineTask: Task<Void, Never>?
+    private var terminationID: UUID?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationID == nil else { return .terminateLater }
+        let id = UUID()
+        terminationID = id
+        terminationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let shouldTerminate = await self.model.shutdown()
+            self.completeTermination(shouldTerminate, sender: sender, id: id)
+        }
+        terminationDeadlineTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: Self.terminationDeadline) }
+            catch { return }
+            guard let self, self.terminationID == id else { return }
+            self.model.cancelTerminationPreparation()
+            self.completeTermination(false, sender: sender, id: id)
+        }
+        return .terminateLater
+    }
+
+    private func completeTermination(_ shouldTerminate: Bool, sender: NSApplication, id: UUID) {
+        guard terminationID == id else { return }
+        terminationID = nil
+        terminationDeadlineTask?.cancel()
+        terminationDeadlineTask = nil
+        terminationTask = nil
+        sender.reply(toApplicationShouldTerminate: shouldTerminate)
+    }
+}
+
 @main
 struct MeetingTranscriberApp: App {
-    @StateObject private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppLifecycleDelegate.self) private var lifecycleDelegate
 
     var body: some Scene {
         WindowGroup("Wherewe") {
-            RootView(model: model)
+            RootView(model: lifecycleDelegate.model)
                 .frame(minWidth: 900, minHeight: 700)
-                .task { await model.connect() }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                    model.shutdown()
-                }
+                .task { await lifecycleDelegate.model.connect() }
         }
         .commands {
             CommandGroup(after: .newItem) {
-                Button("Refresh Meetings") {
-                    Task { await model.refreshMeetings() }
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(model.phase != .ready)
+                RefreshMeetingsCommand(model: lifecycleDelegate.model)
             }
         }
 
         Settings {
-            SettingsView(model: model)
-                .task { await model.loadSettings() }
+            SettingsView(model: lifecycleDelegate.model)
+                .task { await lifecycleDelegate.model.loadSettings() }
         }
+    }
+}
+
+private struct RefreshMeetingsCommand: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Button("Refresh Meetings") {
+            Task { await model.refreshMeetings() }
+        }
+        .keyboardShortcut("r", modifiers: .command)
+        .disabled(model.phase != .ready)
     }
 }
 
