@@ -55,4 +55,17 @@ struct NativePreferencesTests {
         let preferences = try JSONDecoder().decode(NativePreferences.self, from: data)
         #expect(preferences.transcriptView == .edited)
     }
+
+    @Test("transcript auto-follow preserves user scroll intent")
+    func transcriptAutoFollowIntent() {
+        var state = TranscriptAutoFollowState()
+        #expect(state.shouldFollow(searchIsActive: false))
+        #expect(!state.shouldFollow(searchIsActive: true))
+
+        state.recordUserScroll(isNearBottom: false)
+        #expect(!state.shouldFollow(searchIsActive: false))
+
+        state.recordUserScroll(isNearBottom: true)
+        #expect(state.shouldFollow(searchIsActive: false))
+    }
 }

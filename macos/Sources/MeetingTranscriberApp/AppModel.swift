@@ -54,6 +54,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var meetingMutationError: String?
 
     @Published private(set) var transcriptItems: [VisibleTranscriptItem] = []
+    @Published private var transcriptAutoFollowByMeetingID: [Int: TranscriptAutoFollowState] = [:]
     @Published var transcriptSearchText = ""
     @Published var transcriptView: NativePreferences.TranscriptView = .edited {
         didSet {
@@ -240,6 +241,19 @@ final class AppModel: ObservableObject {
             guard dualChannel, let channelID else { return text }
             return "[\(channelID == "ch_0" ? "Me" : "Other")] \(text)"
         }.joined(separator: "\n")
+    }
+
+    func shouldAutoFollowTranscript(meetingID: Int?, searchIsActive: Bool) -> Bool {
+        guard let meetingID else { return !searchIsActive }
+        return (transcriptAutoFollowByMeetingID[meetingID] ?? TranscriptAutoFollowState())
+            .shouldFollow(searchIsActive: searchIsActive)
+    }
+
+    func recordTranscriptUserScroll(isNearBottom: Bool, meetingID: Int?) {
+        guard let meetingID else { return }
+        var state = transcriptAutoFollowByMeetingID[meetingID] ?? TranscriptAutoFollowState()
+        state.recordUserScroll(isNearBottom: isNearBottom)
+        transcriptAutoFollowByMeetingID[meetingID] = state
     }
 
     var canStartRecording: Bool {
