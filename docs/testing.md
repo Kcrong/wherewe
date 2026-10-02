@@ -72,7 +72,7 @@ Repository security, privacy, and strategy contracts:
 | Pull request and `main` push | Linux syntax/scanner/contracts followed by macOS 26 ARM64 Swift build, unit tests, and core checks |
 | Manual Test dispatch | Automatic evidence, an advisory Apple runtime probe, app launch/relaunch, DMG mount verification, and a directly downloadable `.dmg` artifact retained for 7 days |
 | Local pre-push gate | Deterministic tests plus required real Apple Speech and Translation evidence, app launch/relaunch, and DMG mount verification |
-| Release workflow | Pre-secret deterministic and packaging gate with an advisory Apple runtime probe, then Developer ID signing, notarisation, DMG verification, and draft release upload |
+| Release workflow | Pre-secret deterministic and packaging gate, then a Developer ID/notarized DMG when all five release secrets exist or a clearly marked ad-hoc test DMG when none exist; partial configuration fails closed |
 | Physical hardware run | Two explicit microphone/system-input route tests on a prepared Mac |
 
 The local gate is:
@@ -90,6 +90,12 @@ containing an ad-hoc-signed app for hands-on validation. The workflow summary
 links directly to the `.dmg` and its SHA-256 digest; testers must be signed into
 GitHub. macOS may require an explicit Open action because this test artifact is
 not a signed release.
+
+A version tag creates a draft release with the DMG, checksum, and commit-subject
+release notes. All five release secrets select Developer ID signing and
+notarisation; zero secrets select an ad-hoc test build with a warning in the draft;
+a partial secret set fails before the final release build and upload. An ad-hoc
+draft must not be published as a production release.
 
 ## Runtime evidence
 
@@ -123,8 +129,8 @@ exits successfully.
 | Storage and attachments | Path-policy contracts plus security tests | Add user-facing permission-error coverage |
 | Export rollback | Collision and cancellation tests require complete partial-directory removal | Add destination-selection GUI coverage if introduced |
 | Retry and recovery | Translation restart and recording finalisation tests | Keep retries explicit and bounded |
-| Bundle and DMG | Architecture, minimum OS, signatures, entitlement, launch/relaunch, mounted layout, payload rejection, and a 7-day direct test artifact | Validate final Developer ID and notarised artifacts |
-| Release secrets | Pre-secret release gate precedes every credential reference | Protect release environment and approvals |
+| Bundle and DMG | Architecture, minimum OS, signature mode, entitlement, launch/relaunch, mounted layout, payload rejection, and draft asset checksum | Publish only a Developer ID signed and notarised draft; keep ad-hoc drafts for hands-on testing |
+| Release secrets | Pre-secret release gate precedes credential inspection; zero/all/partial sets select ad-hoc/signed/fail-closed modes | Protect release environment and configure all five secrets before production publication |
 | Native UI | No XCUIAutomation target | Add deterministic onboarding, recording, file, glossary, and export flows |
 | Coverage | No coverage baseline | Add a stable risk-focused coverage threshold |
 

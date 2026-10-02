@@ -222,10 +222,11 @@ test("release notes use the nearest strict version tag and commit subjects", () 
   }
 });
 
-test("signing and notarization credentials are used only after the non-secret gate", () => {
+test("release credentials select signed or ad-hoc draft mode after the non-secret gate", () => {
   const gateIndex = release.indexOf("name: Run complete non-secret release gate");
+  const modeIndex = release.indexOf("name: Determine release signing mode");
   const firstSecret = release.indexOf("${{ secrets.");
-  assert.ok(gateIndex >= 0 && firstSecret > gateIndex);
+  assert.ok(gateIndex >= 0 && modeIndex > gateIndex && firstSecret >= modeIndex);
   for (const name of [
     "MACOS_CERTIFICATE_P12_BASE64",
     "MACOS_CERTIFICATE_PASSWORD",
@@ -236,7 +237,22 @@ test("signing and notarization credentials are used only after the non-secret ga
     assert.ok(release.includes(`secrets.${name}`), `missing release secret: ${name}`);
     assert.ok(!releaseGate.includes(name), `non-secret gate references ${name}`);
   }
-  assert.match(release, /Developer ID Application:/);
+
+  const modeStep = namedStep(release, "Determine release signing mode");
+  assert.match(modeStep, /id: release-mode/);
+  assert.match(modeStep, /CONFIGURED_COUNT/);
+  assert.match(modeStep, /0\)[\s\S]{0,120}echo 'signed=false' >> "\$GITHUB_OUTPUT"/);
+  assert.match(modeStep, /5\)[\s\S]{0,120}echo 'signed=true' >> "\$GITHUB_OUTPUT"/);
+  assert.match(modeStep, /\*\)[\s\S]{0,160}partially configured[\s\S]{0,80}exit 1/);
+  assert.match(modeStep, /ad-hoc-signed and not notarized/);
+
+  for (const name of ["Import Developer ID certificate", "Store and validate notarisation credentials", "Notarise and staple DMG"]) {
+    assert.match(namedStep(release, name), /if: steps\.release-mode\.outputs\.signed == 'true'/);
+  }
+  const buildStep = namedStep(release, "Build and verify app");
+  assert.match(buildStep, /SIGNED_RELEASE: \$\{\{ steps\.release-mode\.outputs\.signed \}\}/);
+  assert.match(buildStep, /Authority=Developer ID Application:/);
+  assert.match(buildStep, /Signature=adhoc/);
   assert.match(release, /notarytool submit/);
   assert.match(release, /stapler staple/);
   assert.match(release, /stapler validate/);
