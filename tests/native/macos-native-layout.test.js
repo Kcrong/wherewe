@@ -14,6 +14,14 @@ const view = fs.readFileSync(
   path.join(ROOT, "macos/Sources/MeetingTranscriberApp/MeetingTranscriberApp.swift"),
   "utf8"
 );
+const transcriptStore = fs.readFileSync(
+  path.join(ROOT, "macos/Sources/MeetingTranscriberCore/TranscriptStore.swift"),
+  "utf8"
+);
+const preferenceTests = fs.readFileSync(
+  path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/NativePreferencesTests.swift"),
+  "utf8"
+);
 
 function swiftView(name, nextName) {
   const start = view.indexOf(`private struct ${name}: View {`);
@@ -104,6 +112,19 @@ test("transcript search copy editing and translation retry remain", () => {
   assert.match(model, /api\.editTranscript\(/);
   assert.match(model, /api\.editSegment\(/);
   assert.match(model, /api\.retryTranslation\(/);
+});
+
+test("live transcript follows the bottom until the user scrolls away", () => {
+  const transcriptPane = swiftView("TranscriptPane", "SegmentEditor");
+  assert.match(transcriptStore, /package struct TranscriptAutoFollowState:[\s\S]*recordUserScroll\(isNearBottom:[\s\S]*shouldFollow\(searchIsActive:/);
+  assert.match(preferenceTests, /transcript auto-follow preserves user scroll intent/);
+  assert.match(transcriptPane, /@State private var scrollPhase: ScrollPhase = \.idle/);
+  assert.match(transcriptPane, /ScrollViewReader \{ proxy in[\s\S]*Self\.bottomAnchor/);
+  assert.match(transcriptPane, /\.onScrollGeometryChange\(for: ScrollSnapshot\.self\)[\s\S]{0,220}Self\.isUserDriven\(scrollPhase\)[\s\S]{0,260}recordTranscriptUserScroll/);
+  assert.match(transcriptPane, /abs\(new\.contentHeight - old\.contentHeight\) > 0\.5[\s\S]{0,420}shouldAutoFollowTranscript[\s\S]{0,260}scrollTo\(Self\.bottomAnchor, anchor: \.bottom\)/);
+  assert.match(transcriptPane, /\.onScrollPhaseChange \{ oldPhase, newPhase, context in[\s\S]{0,420}recordTranscriptUserScroll[\s\S]{0,160}context\.geometry/);
+  assert.match(model, /transcriptAutoFollowByMeetingID: \[Int: TranscriptAutoFollowState\]/);
+  assert.doesNotMatch(transcriptPane, /Task\.yield\(\)|\.onChange\(of: filteredItems\)|\.onAppear[\s\S]{0,80}scrollTo/);
 });
 
 test("attachments glossary and export remain local UI surfaces", () => {

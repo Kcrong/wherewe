@@ -33,6 +33,18 @@ public enum VisibleTranscriptItem: Equatable, Identifiable, Sendable {
     }
 }
 
+package struct TranscriptAutoFollowState: Equatable, Sendable {
+    package private(set) var followsLatest = true
+
+    package mutating func recordUserScroll(isNearBottom: Bool) {
+        followsLatest = isNearBottom
+    }
+
+    package func shouldFollow(searchIsActive: Bool) -> Bool {
+        followsLatest && !searchIsActive
+    }
+}
+
 public actor TranscriptStore {
     public private(set) var snapshot = TranscriptSnapshot()
 

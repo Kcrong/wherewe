@@ -838,6 +838,36 @@ private struct WorkspacePane: View {
 
 private struct TranscriptPane: View {
     @ObservedObject var model: AppModel
+    @State private var scrollPhase: ScrollPhase = .idle
+
+    private static let bottomAnchor = "transcript-bottom-anchor"
+
+    private struct ScrollSnapshot: Equatable {
+        let contentHeight: CGFloat
+        let visibleMaxY: CGFloat
+
+        var isNearBottom: Bool {
+            visibleMaxY >= max(0, contentHeight - 24)
+        }
+    }
+
+    private static func snapshot(_ geometry: ScrollGeometry) -> ScrollSnapshot {
+        ScrollSnapshot(
+            contentHeight: geometry.contentSize.height,
+            visibleMaxY: geometry.visibleRect.maxY
+        )
+    }
+
+    private static func isUserDriven(_ phase: ScrollPhase) -> Bool {
+        switch phase {
+        case .tracking, .interacting, .decelerating: true
+        case .idle, .animating: false
+        }
+    }
+
+    private var searchIsActive: Bool {
+        !model.transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -873,20 +903,54 @@ private struct TranscriptPane: View {
                     compact: true
                 )
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(filteredItems) { item in
-                            if isEditing(item) {
-                                SegmentEditor(model: model)
-                                    .id(item.id)
-                            } else {
-                                TranscriptItemView(model: model, item: item, dualChannel: dualChannel)
-                                    .id(item.id)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(filteredItems) { item in
+                                if isEditing(item) {
+                                    SegmentEditor(model: model)
+                                        .id(item.id)
+                                } else {
+                                    TranscriptItemView(model: model, item: item, dualChannel: dualChannel)
+                                        .id(item.id)
+                                }
                             }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(Self.bottomAnchor)
                         }
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.vertical, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onScrollGeometryChange(for: ScrollSnapshot.self) { geometry in
+                        Self.snapshot(geometry)
+                    } action: { old, new in
+                        if Self.isUserDriven(scrollPhase) {
+                            guard !searchIsActive else { return }
+                            model.recordTranscriptUserScroll(
+                                isNearBottom: new.isNearBottom,
+                                meetingID: model.selectedMeetingID
+                            )
+                            return
+                        }
+                        guard abs(new.contentHeight - old.contentHeight) > 0.5,
+                              model.shouldAutoFollowTranscript(
+                                meetingID: model.selectedMeetingID,
+                                searchIsActive: searchIsActive
+                              ) else { return }
+                        proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                    }
+                    .onScrollPhaseChange { oldPhase, newPhase, context in
+                        scrollPhase = newPhase
+                        guard !searchIsActive,
+                              Self.isUserDriven(oldPhase) || Self.isUserDriven(newPhase) else {
+                            return
+                        }
+                        model.recordTranscriptUserScroll(
+                            isNearBottom: Self.snapshot(context.geometry).isNearBottom,
+                            meetingID: model.selectedMeetingID
+                        )
+                    }
                 }
             }
         }
