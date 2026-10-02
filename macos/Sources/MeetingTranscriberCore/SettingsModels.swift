@@ -145,9 +145,24 @@ public struct TranscriptionCatalogueResponse: Codable, Equatable, Sendable {
 public struct PrepareTranscriptionRequest: Codable, Equatable, Sendable {
     public let provider: String
     public let model: String
+    public let language: String
 
-    public init(provider: String, model: String) {
+    private enum CodingKeys: String, CodingKey {
+        case provider
+        case model
+        case language
+    }
+
+    public init(provider: String, model: String, language: String = "en-US") {
         self.provider = provider
         self.model = model
+        self.language = language
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decode(String.self, forKey: .provider)
+        model = try container.decode(String.self, forKey: .model)
+        language = try container.decodeIfPresent(String.self, forKey: .language) ?? "en-US"
     }
 }

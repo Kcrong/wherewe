@@ -15,10 +15,13 @@ const coreDirectory = path.join(ROOT, "macos/Sources/MeetingTranscriberCore");
 const appDirectory = path.join(ROOT, "macos/Sources/MeetingTranscriberApp");
 
 function swiftFiles(directory) {
-  return fs.readdirSync(directory)
-    .filter((name) => name.endsWith(".swift"))
-    .sort()
-    .map((name) => path.join(directory, name));
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) => {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) return swiftFiles(fullPath);
+      return entry.isFile() && entry.name.endsWith(".swift") ? [fullPath] : [];
+    })
+    .sort();
 }
 
 function swiftSources(directory) {
@@ -48,11 +51,23 @@ const appSource = swiftSources(appDirectory);
 test("machine-readable service methods exactly match the Swift protocol", () => {
   assert.equal(contract.transport, "in-process");
   assert.equal(contract.minimumMacOS, "26.0");
-  const serviceProtocol = body(protocol, "public protocol NativeServiceServing", "public enum NativeServiceError");
-  const swiftMethods = [...serviceProtocol.matchAll(/\bfunc\s+([A-Za-z_][A-Za-z0-9_]*)\b/g)]
-    .map((match) => match[1])
-    .sort();
+  const serviceProtocol = body(protocol, "public protocol NativeServiceServing", "public extension NativeServiceServing");
+  const swiftMethods = [...new Set(
+    [...serviceProtocol.matchAll(/\bfunc\s+([A-Za-z_][A-Za-z0-9_]*)\b/g)]
+      .map((match) => match[1]),
+  )].sort();
   assert.deepEqual([...contract.serviceMethods].sort(), swiftMethods);
+  assert.match(serviceProtocol, /func transcriptionCatalogue\(\) async throws/);
+  assert.match(serviceProtocol, /func transcriptionCatalogue\(language: String\) async throws/);
+  assert.match(serviceProtocol, /func prepareTranscription\(provider: String, model: String\) async throws/);
+  assert.match(serviceProtocol, /func prepareTranscription\(provider: String, model: String, language: String\) async throws/);
+  const compatibilityDefaults = body(
+    protocol,
+    "public extension NativeServiceServing",
+    "public enum NativeServiceError",
+  );
+  assert.match(compatibilityDefaults, /transcriptionCatalogue\(language: String\)[\s\S]*transcriptionCatalogue\(\)/);
+  assert.match(compatibilityDefaults, /prepareTranscription\([\s\S]*language: String[\s\S]*prepareTranscription\(provider: provider, model: model\)/);
 });
 
 test("realtime methods and events have exact bidirectional parity", () => {
@@ -96,10 +111,27 @@ test("production imports only approved Apple platform and local modules", () => 
   assert.match(coreSource, /TranslationSession/);
 });
 
-test("production has no network downloader or child-process launch API", () => {
+test("production has no custom network downloader or child-process launch API", () => {
   const production = `${coreSource}\n${appSource}`;
-  assert.doesNotMatch(production, /URLSession|Process\s*\(|NSTask|NWListener|NWConnection/);
-  assert.doesNotMatch(production, /assetInstallationRequest|downloadAndInstall/);
+  const forbiddenCalls = [
+    /URLSession|NSURLConnection|CFReadStream|CFWriteStream|CFSocket|NWListener|NWConnection|(?:Foundation\.)?Process(?:\.init)?\s*\(|NSTask/,
+    /(?:(?<!\.)\b(?:posix_spawnp?|fork|exec[lvpe]*|system|popen|socket)|\b(?:Darwin|Glibc)\.(?:posix_spawnp?|fork|exec[lvpe]*|system|popen|socket))\s*\(/,
+    /URL\(string:\s*["'](?:https?|wss?):/,
+  ];
+  for (const pattern of forbiddenCalls) assert.doesNotMatch(production, pattern);
+  for (const sample of [
+    "Foundation.Process.init()",
+    "Darwin.socket(AF_INET, SOCK_STREAM, 0)",
+    "posix_spawn(nil, path, nil, nil, argv, env)",
+  ]) {
+    assert.ok(forbiddenCalls.some((pattern) => pattern.test(sample)), `undetected forbidden call: ${sample}`);
+  }
+  assert.doesNotMatch(production, /^import\s+(?:CFNetwork|Network|WebKit)$/m);
+  const speech = read("macos/Sources/MeetingTranscriberCore/NativeAppleSpeech.swift");
+  assert.match(speech, /AssetInventory\.assetInstallationRequest\(supporting: \[transcriber\]\)/);
+  assert.match(speech, /downloadAndInstall\(\)/);
+  assert.equal((production.match(/assetInstallationRequest/g) || []).length, 1);
+  assert.equal((production.match(/downloadAndInstall/g) || []).length, 1);
 });
 
 test("Swift package has no external dependency or binary target", () => {

@@ -16,30 +16,73 @@ const exportService = read("macos/Sources/MeetingTranscriberCore/NativeServiceEx
 const realtime = read("macos/Sources/MeetingTranscriberCore/NativeRealtimeClient.swift");
 const spool = read("macos/Sources/MeetingTranscriberCore/NativeSpoolWorkspace.swift");
 const speech = read("macos/Sources/MeetingTranscriberCore/NativeAppleSpeech.swift");
+const speechSettings = read("macos/Sources/MeetingTranscriberCore/NativeServiceSettings.swift");
+const appView = read("macos/Sources/MeetingTranscriberApp/MeetingTranscriberApp.swift");
+const appModel = read("macos/Sources/MeetingTranscriberApp/AppModel.swift");
 const translation = read("macos/Sources/MeetingTranscriberCore/NativeAppleTranslation.swift");
 const build = read("scripts/build-macos-app.sh");
 const appSmoke = read("scripts/test-macos-app-bundle.sh");
 const entitlement = read("macos/Resources/MeetingTranscriber.entitlements");
 
+function sourceBetween(source, start, end) {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert.ok(startIndex >= 0, `missing block start: ${start}`);
+  assert.ok(endIndex > startIndex, `missing block end: ${end}`);
+  return source.slice(startIndex, endIndex);
+}
+
 function swiftSources(directory) {
-  return fs.readdirSync(directory)
-    .filter((name) => name.endsWith(".swift"))
-    .sort()
-    .map((name) => fs.readFileSync(path.join(directory, name), "utf8"))
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) => {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) return [swiftSources(fullPath)];
+      return entry.isFile() && entry.name.endsWith(".swift")
+        ? [fs.readFileSync(fullPath, "utf8")]
+        : [];
+    })
     .join("\n");
 }
 
-test("production performs language processing through Apple system frameworks", () => {
+test("production performs language processing and asset installation through Apple system frameworks", () => {
+  const speechPanel = appView.slice(
+    appView.indexOf("private struct SpeechSettingsView"),
+    appView.indexOf("private struct TranslationSettingsView")
+  );
+  const loadSelectedMeeting = sourceBetween(
+    appModel,
+    "func loadSelectedMeeting()",
+    "func startRecordingWithoutMeeting()"
+  );
+
   assert.match(speech, /import Speech/);
   assert.match(speech, /SpeechAnalyzer/);
-  assert.match(speech, /AssetInventory/);
+  assert.match(speech, /AssetInventory\.assetInstallationRequest\(supporting: \[transcriber\]\)/);
+  assert.match(speech, /downloadAndInstall\(\)/);
+  assert.match(speechSettings, /await speechService\.readiness\(language: language\)/);
+  assert.match(speechPanel, /Button\("Install Selected Speech Assets"\)/);
+  assert.match(speechPanel, /speechPreparationInProgress/);
+  assert.match(speechPanel, /cancelAppleSpeechPreparation/);
+  assert.match(appModel, /transcriptionCatalogueLanguage == recognitionLanguage/);
+  assert.match(appModel, /transcriptionCatalogue = nil\s+transcriptionCatalogueLanguage = nil/);
+  assert.match(appModel, /func applyTranscriptionCatalogue\(/);
+  assert.equal((appModel.match(/transcriptionCatalogue = catalogue/g) || []).length, 1);
+  assert.match(appModel, /speechPreparationTask\?\.cancel\(\)/);
+  assert.match(loadSelectedMeeting, /await refreshTranscriptionReadiness\(for: recognitionLanguage\)\s+guard generation == meetingLoadGeneration, selectedMeetingID == meetingID else \{ return \}\s+_ = await transcriptStore\.activate\(detail\)/);
+  assert.doesNotMatch(speechPanel, /Open Language & Region|openAppleTranslationSettings/);
   assert.match(translation, /import Translation/);
   assert.match(translation, /TranslationSession/);
 });
 
-test("production has no downloader or child executable path", () => {
+test("production has no custom downloader or child executable path", () => {
   const production = `${swiftSources(coreDirectory)}\n${swiftSources(appDirectory)}`;
-  assert.doesNotMatch(production, /URLSession|Process\s*\(|NSTask|NWListener|NWConnection/);
+  for (const pattern of [
+    /URLSession|NSURLConnection|CFReadStream|CFWriteStream|CFSocket|NWListener|NWConnection|(?:Foundation\.)?Process(?:\.init)?\s*\(|NSTask/,
+    /(?:(?<!\.)\b(?:posix_spawnp?|fork|exec[lvpe]*|system|popen|socket)|\b(?:Darwin|Glibc)\.(?:posix_spawnp?|fork|exec[lvpe]*|system|popen|socket))\s*\(/,
+    /URL\(string:\s*["'](?:https?|wss?):/,
+  ]) {
+    assert.doesNotMatch(production, pattern);
+  }
   assert.match(appSmoke, /unexpectedly spawned child processes/);
 });
 

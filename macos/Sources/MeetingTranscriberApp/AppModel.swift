@@ -96,8 +96,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var settingsDocument: SettingsDocument?
     @Published private(set) var settingsETag: String?
     @Published private(set) var transcriptionCatalogue: TranscriptionCatalogueResponse?
+    @Published private(set) var transcriptionCatalogueLanguage: String?
     @Published private(set) var translationLanguagesStatus: TranslationLanguagesResponse?
     @Published private(set) var settingsInProgress = false
+    @Published private(set) var speechPreparationInProgress = false
     @Published private(set) var settingsError: String?
 
     @Published private(set) var audioDevices: [AudioInputDevice] = []
@@ -126,7 +128,12 @@ final class AppModel: ObservableObject {
     }
     @Published var recognitionLanguage = "en-US" {
         didSet {
-            if !restoringMeetingValues { persist(recognitionLanguage, key: "sel.lang") }
+            transcriptionCatalogue = nil
+            transcriptionCatalogueLanguage = nil
+            guard !restoringMeetingValues else { return }
+            persist(recognitionLanguage, key: "sel.lang")
+            let language = recognitionLanguage
+            Task { await refreshTranscriptionReadiness(for: language) }
         }
     }
     @Published var translationTarget = "ko" {
@@ -145,6 +152,7 @@ final class AppModel: ObservableObject {
     private var realtimeEventTask: Task<Void, Never>?
     private var recordingTimerTask: Task<Void, Never>?
     private var captureStallTask: Task<Void, Never>?
+    private var speechPreparationTask: Task<Void, Never>?
     private var levelMeter: CaptureLevelMeter?
     private var meetingLoadGeneration = 0
     private var restoringMeetingValues = false
@@ -243,7 +251,8 @@ final class AppModel: ObservableObject {
     }
 
     var selectedTranscriptionReady: Bool {
-        guard let provider = transcriptionCatalogue?.localProviders.first(where: { $0.id == "apple" }) else {
+        guard transcriptionCatalogueLanguage == recognitionLanguage,
+              let provider = transcriptionCatalogue?.localProviders.first(where: { $0.id == "apple" }) else {
             return false
         }
         return provider.available && provider.ready
@@ -264,7 +273,9 @@ final class AppModel: ObservableObject {
             try await coordinator.connect()
             do { try loadAudioDevices() }
             catch { recordingError = error.localizedDescription }
-            transcriptionCatalogue = try await api.transcriptionCatalogue()
+            let catalogueLanguage = recognitionLanguage
+            let catalogue = try await api.transcriptionCatalogue(language: catalogueLanguage)
+            applyTranscriptionCatalogue(catalogue, for: catalogueLanguage)
             meetings = try await api.meetings()
 
             let status = try await api.recordingStatus(socketID: realtime.clientID)
@@ -341,6 +352,8 @@ final class AppModel: ObservableObject {
             recognitionLanguage = detail.language
             translationTarget = detail.translationTarget
             restoringMeetingValues = false
+            await refreshTranscriptionReadiness(for: recognitionLanguage)
+            guard generation == meetingLoadGeneration, selectedMeetingID == meetingID else { return }
             _ = await transcriptStore.activate(detail)
             await refreshTranscriptItems()
             await loadDocuments()
@@ -704,13 +717,14 @@ final class AppModel: ObservableObject {
         settingsError = nil
         defer { settingsInProgress = false }
         do {
+            let catalogueLanguage = recognitionLanguage
             async let envelopeCall = api.settings()
-            async let transcriptionCall = api.transcriptionCatalogue()
+            async let transcriptionCall = api.transcriptionCatalogue(language: catalogueLanguage)
             let (envelope, transcription) = try await (envelopeCall, transcriptionCall)
             settingsDocument = envelope.document
             settingsETag = envelope.etag
             settingsDraft = envelope.document.updateRequest
-            transcriptionCatalogue = transcription
+            applyTranscriptionCatalogue(transcription, for: catalogueLanguage)
         } catch {
             settingsError = error.localizedDescription
         }
@@ -732,16 +746,68 @@ final class AppModel: ObservableObject {
         settingsDraft = draft
     }
 
-    func prepareAppleSpeech() async {
-        guard !settingsInProgress else { return }
-        settingsInProgress = true
-        settingsError = nil
-        defer { settingsInProgress = false }
+    private func applyTranscriptionCatalogue(
+        _ catalogue: TranscriptionCatalogueResponse,
+        for language: String
+    ) {
+        guard recognitionLanguage == language else { return }
+        transcriptionCatalogue = catalogue
+        transcriptionCatalogueLanguage = language
+    }
+
+    private func refreshTranscriptionReadiness(for language: String) async {
         do {
-            transcriptionCatalogue = try await api.prepareTranscription(
+            let catalogue = try await api.transcriptionCatalogue(language: language)
+            applyTranscriptionCatalogue(catalogue, for: language)
+        } catch {
+            guard recognitionLanguage == language else { return }
+            if showingSettings {
+                settingsError = error.localizedDescription
+            } else {
+                recordingError = error.localizedDescription
+            }
+        }
+    }
+
+    func startAppleSpeechPreparation() {
+        guard speechPreparationTask == nil, !settingsInProgress else { return }
+        let language = recognitionLanguage
+        speechPreparationTask = Task { [weak self] in
+            await self?.prepareAppleSpeech(language: language)
+        }
+    }
+
+    func cancelAppleSpeechPreparation() {
+        speechPreparationTask?.cancel()
+    }
+
+    private func prepareAppleSpeech(language: String) async {
+        guard !settingsInProgress else {
+            speechPreparationTask = nil
+            return
+        }
+        settingsInProgress = true
+        speechPreparationInProgress = true
+        settingsError = nil
+        defer {
+            speechPreparationInProgress = false
+            settingsInProgress = false
+            speechPreparationTask = nil
+        }
+        do {
+            let catalogue = try await api.prepareTranscription(
                 provider: "apple",
-                model: "system"
+                model: "system",
+                language: language
             )
+            try Task.checkCancellation()
+            if recognitionLanguage == language {
+                applyTranscriptionCatalogue(catalogue, for: language)
+            } else {
+                await refreshTranscriptionReadiness(for: recognitionLanguage)
+            }
+        } catch is CancellationError {
+            await refreshTranscriptionReadiness(for: recognitionLanguage)
         } catch {
             settingsError = error.localizedDescription
         }
@@ -792,7 +858,9 @@ final class AppModel: ObservableObject {
             settingsDocument = envelope.document
             settingsETag = envelope.etag
             settingsDraft = envelope.document.updateRequest
-            transcriptionCatalogue = try await api.transcriptionCatalogue()
+            let catalogueLanguage = recognitionLanguage
+            let catalogue = try await api.transcriptionCatalogue(language: catalogueLanguage)
+            applyTranscriptionCatalogue(catalogue, for: catalogueLanguage)
             if !wasConfigured {
                 showingSettings = false
                 settingsInProgress = false
@@ -918,6 +986,7 @@ final class AppModel: ObservableObject {
 
     func shutdown() {
         suppressDisconnectRecovery = true
+        speechPreparationTask?.cancel()
         Task {
             realtimeEventTask?.cancel()
             recordingTimerTask?.cancel()

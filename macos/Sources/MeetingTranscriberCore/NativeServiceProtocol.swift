@@ -28,14 +28,32 @@ public protocol NativeServiceServing: Sendable {
     func settings() async throws -> SettingsEnvelope
     func importSettings(_ data: Data, etag: String?) async throws -> SettingsEnvelope
     func updateSettings(_ request: SettingsUpdateRequest, etag: String?) async throws -> SettingsEnvelope
+    @available(*, deprecated, message: "Pass the selected recognition language explicitly.")
     func transcriptionCatalogue() async throws -> TranscriptionCatalogueResponse
+    func transcriptionCatalogue(language: String) async throws -> TranscriptionCatalogueResponse
     func translationLanguages() async throws -> TranslationLanguagesResponse
     func openTranslationSettings() async throws -> OpenSettingsResponse
+    @available(*, deprecated, message: "Pass the selected recognition language explicitly.")
     func prepareTranscription(provider: String, model: String) async throws -> TranscriptionCatalogueResponse
+    func prepareTranscription(provider: String, model: String, language: String) async throws -> TranscriptionCatalogueResponse
     func recordingStatus(socketID: String?) async throws -> RecordingStatus
     func recordingPreparation(meetingID: Int) async throws -> RecordingPreparation
     func startRecording(meetingID: Int, request: StartRecordingRequest) async throws -> StartRecordingResponse
     func finalizeRecording(_ request: FinalizeRecordingRequest) async throws -> SuccessResponse
+}
+
+public extension NativeServiceServing {
+    func transcriptionCatalogue(language: String) async throws -> TranscriptionCatalogueResponse {
+        try await transcriptionCatalogue()
+    }
+
+    func prepareTranscription(
+        provider: String,
+        model: String,
+        language: String
+    ) async throws -> TranscriptionCatalogueResponse {
+        try await prepareTranscription(provider: provider, model: model)
+    }
 }
 
 public enum NativeServiceError: Error, Equatable, LocalizedError, Sendable {

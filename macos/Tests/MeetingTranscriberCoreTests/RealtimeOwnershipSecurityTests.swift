@@ -9,7 +9,13 @@ struct RealtimeOwnershipSecurityTests {
         let fixture = try RealtimeSecurityFixture()
         defer { fixture.remove() }
         let insertGate = RealtimeSuspensionGate()
-        let service = makeTestService(configuration: fixture.configuration)
+        let prepareCounter = SpeechPrepareCallCounter()
+        let service = NativeService(
+            configuration: fixture.configuration,
+            eventHub: NativeRealtimeHub(),
+            speechService: CountingSpeechService(counter: prepareCounter),
+            translationService: DeterministicTranslationService()
+        )
         await service.setRecordingLifecycleObserver(NativeRecordingLifecycleObserver(
             beforeTranscriptInsert: { _ in await insertGate.pause() }
         ))
@@ -17,6 +23,29 @@ struct RealtimeOwnershipSecurityTests {
         let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Generation takeover"))
         let first = try await startClaim(service, meetingID: meeting.id, clientID: "client-one")
         let request = transcriptionRequest(meetingID: meeting.id, generation: first.generation)
+        let wrongLanguage = StartTranscriptionRequest(
+            meetingID: meeting.id,
+            generation: first.generation,
+            language: "ja-JP",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        await #expect(throws: NativeServiceError.self) {
+            _ = try await service.prepareRealtimeTranscription(wrongLanguage, clientID: "client-one")
+        }
+        let wrongTarget = StartTranscriptionRequest(
+            meetingID: meeting.id,
+            generation: first.generation,
+            language: "en-US",
+            translationTarget: "ja",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        await #expect(throws: NativeServiceError.self) {
+            _ = try await service.prepareRealtimeTranscription(wrongTarget, clientID: "client-one")
+        }
+        #expect(await prepareCounter.value() == 0)
 
         let staleCommit = Task {
             try await service.commitRealtimeChunk(

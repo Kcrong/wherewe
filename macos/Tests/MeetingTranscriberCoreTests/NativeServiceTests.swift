@@ -13,6 +13,28 @@ struct NativeServiceTests {
         let initial = try await service.health()
         #expect(initial.state == .setupRequired)
         #expect(!initial.realtimeAvailable)
+        let legacyPreparation = try JSONDecoder().decode(
+            PrepareTranscriptionRequest.self,
+            from: Data(#"{"provider":"apple","model":"system"}"#.utf8)
+        )
+        #expect(legacyPreparation.language == "en-US")
+        let reservedLocales = [Locale(identifier: "ko-KR"), Locale(identifier: "en-US")]
+        let releaseLocale = nativeSpeechReservationToRelease(
+            targetLocale: Locale(identifier: "ja-JP"),
+            reservedLocales: reservedLocales,
+            maximumReservedLocales: 2
+        )
+        #expect(releaseLocale?.identifier(.bcp47) == "en-US")
+        #expect(nativeSpeechReservationToRelease(
+            targetLocale: Locale(identifier: "en-US"),
+            reservedLocales: reservedLocales,
+            maximumReservedLocales: 2
+        ) == nil)
+        #expect(nativeSpeechReservationToRelease(
+            targetLocale: Locale(identifier: "ja-JP"),
+            reservedLocales: reservedLocales,
+            maximumReservedLocales: 3
+        ) == nil)
 
         var request = try await service.settings().document.updateRequest
         request.user.name = "Native Tester"
@@ -29,9 +51,353 @@ struct NativeServiceTests {
         #expect(saved.document.transcription.local.provider == "apple")
         #expect(saved.document.transcription.local.model == "system")
         #expect(saved.document.translation.provider == "apple")
-        #expect(try await service.transcriptionCatalogue().localProviders.map(\.id) == ["apple"])
+        let catalogue = try await service.transcriptionCatalogue(language: "en-US")
+        #expect(catalogue.localProviders.map(\.id) == ["apple"])
+        #expect(catalogue.localProviders.first?.available == true)
+        #expect(catalogue.localProviders.first?.ready == true)
+        #expect(catalogue.progress.state == "ready")
         #expect(try await service.health().state == .ready)
         #expect(fixture.permissions(of: fixture.configURL) == 0o600)
+
+        let missingAssetFixture = try Fixture()
+        defer { missingAssetFixture.remove() }
+        let missingAssetService = makeTestService(
+            configuration: missingAssetFixture.configuration,
+            speechReady: false
+        )
+        let missingAssetCatalogue = try await missingAssetService.transcriptionCatalogue(language: "en-US")
+        #expect(missingAssetCatalogue.localProviders.first?.available == true)
+        #expect(missingAssetCatalogue.localProviders.first?.ready == false)
+        #expect(missingAssetCatalogue.progress.state == "installation-required")
+        #expect(missingAssetCatalogue.progress.message == "Install English Speech assets before recording.")
+
+        try await missingAssetFixture.configure(missingAssetService)
+        let meeting = try await missingAssetService.createMeeting(CreateMeetingRequest(
+            title: "Speech asset readiness",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+        do {
+            _ = try await missingAssetService.startRecording(
+                meetingID: meeting.id,
+                request: StartRecordingRequest(
+                    socketID: "speech-readiness-client",
+                    language: "en-US",
+                    translationTarget: "ko"
+                )
+            )
+            Issue.record("recording must not claim state before Speech assets are ready")
+        } catch let error as NativeServiceError {
+            #expect(error == .server(
+                status: 409,
+                code: "APPLE_SPEECH_NOT_READY",
+                message: "Install English Speech assets in Settings before recording."
+            ))
+        }
+        #expect(try await !missingAssetService.recordingStatus(socketID: nil).selectionLocked)
+
+        let koreanCatalogue = try await missingAssetService.prepareTranscription(
+            provider: "apple",
+            model: "system",
+            language: "ko-KR"
+        )
+        #expect(koreanCatalogue.localProviders.first?.ready == true)
+        #expect(try await missingAssetService.transcriptionCatalogue(language: "en-US").progress.state == "installation-required")
+
+        let installedCatalogue = try await missingAssetService.prepareTranscription(
+            provider: "apple",
+            model: "system",
+            language: "en-US"
+        )
+        #expect(installedCatalogue.localProviders.first?.ready == true)
+        let started = try await missingAssetService.startRecording(
+            meetingID: meeting.id,
+            request: StartRecordingRequest(
+                socketID: "speech-readiness-client",
+                language: "en-US",
+                translationTarget: "ko"
+            )
+        )
+        #expect(started.preparedLocale == "en-US")
+        do {
+            _ = try await missingAssetService.prepareTranscription(
+                provider: "apple",
+                model: "system",
+                language: "ko-KR"
+            )
+            Issue.record("installing another Speech locale must be rejected during recording")
+        } catch let error as NativeServiceError {
+            #expect(error == .server(
+                status: 409,
+                code: "APPLE_SPEECH_PREPARATION_ACTIVE",
+                message: "Wait for recording startup or recording to finish before installing Speech assets."
+            ))
+        }
+        _ = try await missingAssetService.finalizeRecording(FinalizeRecordingRequest(
+            meetingID: meeting.id,
+            generation: started.generation,
+            socketID: "speech-readiness-client"
+        ))
+
+        let preparationFixture = try Fixture()
+        defer { preparationFixture.remove() }
+        let preparationGate = SuspendedSpeechReadinessGate()
+        let preparationService = NativeService(
+            configuration: preparationFixture.configuration,
+            eventHub: NativeRealtimeHub(),
+            speechService: SuspendedPrepareSpeechService(gate: preparationGate),
+            translationService: DeterministicTranslationService()
+        )
+        try await preparationFixture.configure(preparationService)
+        let preparationMeeting = try await preparationService.createMeeting(CreateMeetingRequest(
+            title: "Preparation serialization",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+        let preparationTask = Task {
+            try await preparationService.prepareTranscription(
+                provider: "apple",
+                model: "system",
+                language: "ko-KR"
+            )
+        }
+        do {
+            try await preparationGate.waitUntilRequests(1)
+        } catch {
+            preparationTask.cancel()
+            await preparationGate.releaseAll()
+            throw error
+        }
+        do {
+            _ = try await preparationService.startRecording(
+                meetingID: preparationMeeting.id,
+                request: StartRecordingRequest(
+                    socketID: "preparation-serialization-client",
+                    language: "en-US",
+                    translationTarget: "ko"
+                )
+            )
+            Issue.record("recording must not start while Speech reservations are changing")
+        } catch let error as NativeServiceError {
+            #expect(error == .server(
+                status: 409,
+                code: "APPLE_SPEECH_PREPARATION_ACTIVE",
+                message: "Wait for Speech asset installation to finish before recording."
+            ))
+        }
+        #expect(try await !preparationService.recordingStatus(socketID: nil).selectionLocked)
+        await preparationGate.releaseAll()
+        #expect(try await preparationTask.value.localProviders.first?.ready == true)
+    }
+
+    @Test("concurrent starts create one claim after readiness suspension")
+    func concurrentRecordingStarts() async throws {
+        let blockedFixture = try Fixture()
+        defer { blockedFixture.remove() }
+        let blockedGate = SuspendedSpeechReadinessGate()
+        let blockedService = NativeService(
+            configuration: blockedFixture.configuration,
+            eventHub: NativeRealtimeHub(),
+            speechService: SuspendedReadySpeechService(gate: blockedGate),
+            translationService: DeterministicTranslationService()
+        )
+        try await blockedFixture.configure(blockedService)
+        let originalMeeting = try await blockedService.createMeeting(CreateMeetingRequest(
+            title: "Original database meeting",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+        let blockedStart = Task {
+            try await blockedService.startRecording(
+                meetingID: originalMeeting.id,
+                request: StartRecordingRequest(
+                    socketID: "blocked-settings-client",
+                    language: "ja-JP",
+                    translationTarget: "en"
+                )
+            )
+        }
+        do {
+            try await blockedGate.waitUntilRequests(1)
+        } catch {
+            blockedStart.cancel()
+            await blockedGate.releaseAll()
+            throw error
+        }
+        let currentSettings = try await blockedService.settings()
+        var replacement = currentSettings.document.updateRequest
+        let replacementRoot = blockedFixture.root.appendingPathComponent("replacement", isDirectory: true)
+        let replacementData = replacementRoot.appendingPathComponent("data", isDirectory: true)
+        try FileManager.default.createDirectory(at: replacementData, withIntermediateDirectories: true)
+        let corruptDatabase = replacementData.appendingPathComponent("meetings.db")
+        try Data("not-a-sqlite-database".utf8).write(to: corruptDatabase)
+        replacement.paths.database = corruptDatabase.path
+        replacement.paths.files = replacementData.appendingPathComponent("files", isDirectory: true).path
+        do {
+            _ = try await blockedService.updateSettings(replacement, etag: currentSettings.etag)
+            Issue.record("settings update must be rejected while recording startup is pending")
+        } catch let error as NativeServiceError {
+            #expect(error == .server(
+                status: 409,
+                code: "SETTINGS_TRANSCRIPTION_ACTIVE",
+                message: "Wait for recording startup to finish before changing settings."
+            ))
+        }
+        do {
+            _ = try await blockedService.importSettings(
+                JSONEncoder().encode(replacement),
+                etag: currentSettings.etag
+            )
+            Issue.record("settings import must be rejected while recording startup is pending")
+        } catch let error as NativeServiceError {
+            #expect(error == .server(
+                status: 409,
+                code: "SETTINGS_TRANSCRIPTION_ACTIVE",
+                message: "Stop recording or wait for recording startup to finish before importing settings."
+            ))
+        }
+        #expect(try await blockedService.settings().document.paths.database == blockedFixture.databaseURL.path)
+        await blockedGate.releaseAll()
+        let blockedStarted = try await blockedStart.value
+        #expect(blockedStarted.preparedLocale == "ja-JP")
+        #expect(try await blockedService.meeting(id: originalMeeting.id).language == "ja-JP")
+        _ = try await blockedService.finalizeRecording(FinalizeRecordingRequest(
+            meetingID: originalMeeting.id,
+            generation: blockedStarted.generation,
+            socketID: "blocked-settings-client"
+        ))
+
+        let deletedFixture = try Fixture()
+        defer { deletedFixture.remove() }
+        let deletedGate = SuspendedSpeechReadinessGate()
+        let deletedService = NativeService(
+            configuration: deletedFixture.configuration,
+            eventHub: NativeRealtimeHub(),
+            speechService: SuspendedReadySpeechService(gate: deletedGate),
+            translationService: DeterministicTranslationService()
+        )
+        try await deletedFixture.configure(deletedService)
+        let deletedMeeting = try await deletedService.createMeeting(CreateMeetingRequest(
+            title: "Deleted during readiness",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+        let deletedStart = Task {
+            try await deletedService.startRecording(
+                meetingID: deletedMeeting.id,
+                request: StartRecordingRequest(
+                    socketID: "deleted-readiness-client",
+                    language: "en-US",
+                    translationTarget: "ko"
+                )
+            )
+        }
+        do {
+            try await deletedGate.waitUntilRequests(1)
+        } catch {
+            deletedStart.cancel()
+            await deletedGate.releaseAll()
+            throw error
+        }
+        do {
+            _ = try await deletedService.prepareTranscription(
+                provider: "apple",
+                model: "system",
+                language: "ko-KR"
+            )
+            Issue.record("Speech reservations must not change while recording startup is pending")
+        } catch let error as NativeServiceError {
+            #expect(error == .server(
+                status: 409,
+                code: "APPLE_SPEECH_PREPARATION_ACTIVE",
+                message: "Wait for recording startup or recording to finish before installing Speech assets."
+            ))
+        }
+        _ = try await deletedService.deleteMeeting(id: deletedMeeting.id, socketID: nil)
+        await deletedGate.releaseAll()
+        await #expect(throws: NativeServiceError.self) {
+            _ = try await deletedStart.value
+        }
+        let deletedStatus = try await deletedService.recordingStatus(socketID: nil)
+        #expect(!deletedStatus.selectionLocked)
+        #expect(deletedStatus.recordingGeneration == nil)
+
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let gate = SuspendedSpeechReadinessGate()
+        let service = NativeService(
+            configuration: fixture.configuration,
+            eventHub: NativeRealtimeHub(),
+            speechService: SuspendedReadySpeechService(gate: gate),
+            translationService: DeterministicTranslationService()
+        )
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(
+            title: "Concurrent readiness",
+            language: "en-US",
+            translationTarget: "ko"
+        ))
+        let first = Task { () throws -> (socketID: String, response: StartRecordingResponse) in
+            let socketID = "readiness-client-one"
+            let response = try await service.startRecording(
+                meetingID: meeting.id,
+                request: StartRecordingRequest(
+                    socketID: socketID,
+                    language: "en-US",
+                    translationTarget: "ko"
+                )
+            )
+            return (socketID, response)
+        }
+        let second = Task { () throws -> (socketID: String, response: StartRecordingResponse) in
+            let socketID = "readiness-client-two"
+            let response = try await service.startRecording(
+                meetingID: meeting.id,
+                request: StartRecordingRequest(
+                    socketID: socketID,
+                    language: "en-US",
+                    translationTarget: "ko"
+                )
+            )
+            return (socketID, response)
+        }
+
+        do {
+            try await gate.waitUntilRequests(2)
+        } catch {
+            first.cancel()
+            second.cancel()
+            await gate.releaseAll()
+            throw error
+        }
+        await gate.releaseAll()
+        var successes: [(socketID: String, response: StartRecordingResponse)] = []
+        var failures: [Error] = []
+        for task in [first, second] {
+            do { successes.append(try await task.value) }
+            catch { failures.append(error) }
+        }
+        #expect(successes.count == 1)
+        #expect(failures.count == 1)
+        if let failure = failures.first as? NativeServiceError {
+            #expect(failure == .server(
+                status: 409,
+                code: "RECORDING_ACTIVE",
+                message: "Another recording is active."
+            ))
+        } else {
+            Issue.record("concurrent start loser must report RECORDING_ACTIVE")
+        }
+        let started = try #require(successes.first)
+        let status = try await service.recordingStatus(socketID: started.socketID)
+        #expect(status.selectionLocked)
+        #expect(status.recordingOwnedByRequester)
+        #expect(status.recordingGeneration == started.response.generation)
+        _ = try await service.finalizeRecording(FinalizeRecordingRequest(
+            meetingID: meeting.id,
+            generation: started.response.generation,
+            socketID: started.socketID
+        ))
     }
 
     @Test("legacy settings import keeps paths and normalizes retired selections")

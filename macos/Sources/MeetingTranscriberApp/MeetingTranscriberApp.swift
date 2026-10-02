@@ -307,18 +307,21 @@ private struct SpeechSettingsView: View {
                         } else {
                             ProgressView("Checking Apple Speech…")
                         }
-                        Text("Speech language assets are installed by macOS. Wherewe only checks whether the English assets are ready.")
+                        Text("Wherewe asks macOS to install assets for the selected recognition language when needed. Apple manages the download and system storage.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack {
-                            Button("Check English Speech Assets") {
-                                Task { await model.prepareAppleSpeech() }
+                            Button("Install Selected Speech Assets") {
+                                model.startAppleSpeechPreparation()
                             }
                             .disabled(model.settingsInProgress)
-                            Button("Open Language & Region…") {
-                                Task { await model.openAppleTranslationSettings() }
-                            }
-                            if let message = model.transcriptionCatalogue?.progress.message {
+                            if model.speechPreparationInProgress {
+                                ProgressView("Installing Speech Assets…")
+                                    .controlSize(.small)
+                                Button("Cancel") {
+                                    model.cancelAppleSpeechPreparation()
+                                }
+                            } else if let message = model.transcriptionCatalogue?.progress.message {
                                 Text(message)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -648,7 +651,7 @@ private struct MeetingDetailView: View {
                     .disabled(!model.canStartRecording)
                     .accessibilityIdentifier("start-recording")
                     if !model.selectedTranscriptionReady {
-                        Text("Prepare Apple Speech in Settings before recording.")
+                        Text("Install the selected Speech assets in Settings before recording.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

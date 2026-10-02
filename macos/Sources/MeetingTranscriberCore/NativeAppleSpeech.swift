@@ -9,8 +9,26 @@ struct NativeTranscriptionResult: Sendable {
     let confidence: Double?
 }
 
+func nativeSpeechLanguageLabel(_ identifier: String) -> String {
+    switch identifier {
+    case "en-US": "English"
+    case "ko-KR": "Korean"
+    case "ja-JP": "Japanese"
+    case "zh-CN": "Chinese"
+    default: identifier
+    }
+}
+
+enum NativeSpeechReadiness: Equatable, Sendable {
+    case unavailable
+    case unsupported
+    case installationRequired
+    case ready
+}
+
 protocol NativeSpeechServing: Sendable {
     func isAvailable() -> Bool
+    func readiness(language: String) async -> NativeSpeechReadiness
     func prepare(language: String, mode: String, showDetails: Bool) async throws
     func transcribe(
         language: String,
@@ -25,6 +43,11 @@ struct NativeAppleSpeechService: NativeSpeechServing {
     func isAvailable() -> Bool {
         guard #available(macOS 26.0, *) else { return false }
         return NativeAppleSpeech.isAvailable
+    }
+
+    func readiness(language: String) async -> NativeSpeechReadiness {
+        guard #available(macOS 26.0, *) else { return .unavailable }
+        return await NativeAppleSpeech.readiness(language: language)
     }
 
     func prepare(language: String, mode: String, showDetails: Bool) async throws {
@@ -60,7 +83,8 @@ enum NativeAppleSpeechError: Error, LocalizedError {
     case invalidPCM
     case noFormat
     case conversion
-    case assetNotInstalled
+    case assetReservationUnavailable(String)
+    case assetInstallationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -69,9 +93,28 @@ enum NativeAppleSpeechError: Error, LocalizedError {
         case .invalidPCM: "Apple SpeechAnalyzer received invalid PCM audio."
         case .noFormat: "Apple SpeechAnalyzer did not provide a compatible audio format."
         case .conversion: "Audio conversion for Apple SpeechAnalyzer failed."
-        case .assetNotInstalled: "Install the Apple Speech language assets in System Settings, then try again."
+        case let .assetReservationUnavailable(locale): "macOS cannot reserve \(nativeSpeechLanguageLabel(locale)) Speech assets. Free storage or select an already installed language, then try again."
+        case let .assetInstallationFailed(locale): "macOS could not install \(nativeSpeechLanguageLabel(locale)) Speech assets. Check your internet connection and available storage, then try again."
         }
     }
+}
+
+@available(macOS 26.0, *)
+func nativeSpeechReservationToRelease(
+    targetLocale: Locale,
+    reservedLocales: [Locale],
+    maximumReservedLocales: Int
+) -> Locale? {
+    let targetIdentifier = targetLocale.identifier(.bcp47)
+    guard maximumReservedLocales > 0,
+          !reservedLocales.contains(where: { $0.identifier(.bcp47) == targetIdentifier }),
+          reservedLocales.count >= maximumReservedLocales else {
+        return nil
+    }
+    return reservedLocales
+        .filter { $0.identifier(.bcp47) != targetIdentifier }
+        .sorted { $0.identifier(.bcp47) < $1.identifier(.bcp47) }
+        .first
 }
 
 enum NativeAppleSpeech {
@@ -80,6 +123,19 @@ enum NativeAppleSpeech {
     /// to skip rather than fail can probe this first.
     @available(macOS 26.0, *)
     static var isAvailable: Bool { SpeechTranscriber.isAvailable }
+
+    @available(macOS 26.0, *)
+    static func readiness(language: String) async -> NativeSpeechReadiness {
+        guard SpeechTranscriber.isAvailable else { return .unavailable }
+        guard let locale = await SpeechTranscriber.supportedLocale(
+            equivalentTo: Locale(identifier: language)
+        ) else { return .unsupported }
+        let identifier = locale.identifier(.bcp47)
+        let installedLocales = await SpeechTranscriber.installedLocales
+        return installedLocales.contains { $0.identifier(.bcp47) == identifier }
+            ? .ready
+            : .installationRequired
+    }
 
     @available(macOS 26.0, *)
     static func prepare(
@@ -105,7 +161,45 @@ enum NativeAppleSpeech {
         )
         let status = await AssetInventory.status(forModules: [transcriber])
         if status == .unsupported { throw NativeAppleSpeechError.unsupportedLocale(language) }
-        guard status == .installed else { throw NativeAppleSpeechError.assetNotInstalled }
+        if status != .installed {
+            try Task.checkCancellation()
+            let reservedLocales = await AssetInventory.reservedLocales
+            let maximumReservedLocales = AssetInventory.maximumReservedLocales
+            let targetIdentifier = locale.identifier(.bcp47)
+            let targetIsReserved = reservedLocales.contains {
+                $0.identifier(.bcp47) == targetIdentifier
+            }
+            if !targetIsReserved, reservedLocales.count >= maximumReservedLocales {
+                guard let releaseLocale = nativeSpeechReservationToRelease(
+                    targetLocale: locale,
+                    reservedLocales: reservedLocales,
+                    maximumReservedLocales: maximumReservedLocales
+                ), await AssetInventory.release(reservedLocale: releaseLocale) else {
+                    throw NativeAppleSpeechError.assetReservationUnavailable(language)
+                }
+            }
+            do {
+                if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                    try await request.downloadAndInstall()
+                }
+            } catch let error as CancellationError {
+                throw error
+            } catch {
+                let currentReservations = await AssetInventory.reservedLocales
+                let reservationUnavailable = !currentReservations.contains {
+                    $0.identifier(.bcp47) == targetIdentifier
+                } && currentReservations.count >= AssetInventory.maximumReservedLocales
+                if reservationUnavailable {
+                    throw NativeAppleSpeechError.assetReservationUnavailable(language)
+                }
+                throw NativeAppleSpeechError.assetInstallationFailed(language)
+            }
+            try Task.checkCancellation()
+            let installedStatus = await AssetInventory.status(forModules: [transcriber])
+            guard installedStatus == .installed else {
+                throw NativeAppleSpeechError.assetInstallationFailed(language)
+            }
+        }
         return transcriber
     }
 
