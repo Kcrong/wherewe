@@ -118,6 +118,56 @@ struct SuspendedReadySpeechService: NativeSpeechServing {
     }
 }
 
+struct SuspendedPrepareSpeechService: NativeSpeechServing {
+    let gate: SuspendedSpeechReadinessGate
+
+    func isAvailable() -> Bool { true }
+
+    func readiness(language: String) async -> NativeSpeechReadiness { .ready }
+
+    func prepare(language: String, mode: String, showDetails: Bool) async throws {
+        _ = await gate.readiness()
+    }
+
+    func transcribe(
+        language: String,
+        sampleRate: Double,
+        pcm: Data,
+        mode: String,
+        showDetails: Bool
+    ) async throws -> NativeTranscriptionResult {
+        NativeTranscriptionResult(text: "Suspended preparation speech.", alternatives: [], confidence: 1)
+    }
+}
+
+actor SpeechPrepareCallCounter {
+    private var calls = 0
+
+    func record() { calls += 1 }
+    func value() -> Int { calls }
+}
+
+struct CountingSpeechService: NativeSpeechServing {
+    let counter: SpeechPrepareCallCounter
+
+    func isAvailable() -> Bool { true }
+    func readiness(language: String) async -> NativeSpeechReadiness { .ready }
+
+    func prepare(language: String, mode: String, showDetails: Bool) async throws {
+        await counter.record()
+    }
+
+    func transcribe(
+        language: String,
+        sampleRate: Double,
+        pcm: Data,
+        mode: String,
+        showDetails: Bool
+    ) async throws -> NativeTranscriptionResult {
+        NativeTranscriptionResult(text: "Counted speech.", alternatives: [], confidence: 1)
+    }
+}
+
 actor DeterministicTranslationService: NativeTranslationServing {
     let behavior: DeterministicTranslationBehavior
 

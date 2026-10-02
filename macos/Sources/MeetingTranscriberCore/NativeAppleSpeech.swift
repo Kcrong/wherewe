@@ -83,6 +83,7 @@ enum NativeAppleSpeechError: Error, LocalizedError {
     case invalidPCM
     case noFormat
     case conversion
+    case assetReservationUnavailable(String)
     case assetInstallationFailed(String)
 
     var errorDescription: String? {
@@ -92,9 +93,28 @@ enum NativeAppleSpeechError: Error, LocalizedError {
         case .invalidPCM: "Apple SpeechAnalyzer received invalid PCM audio."
         case .noFormat: "Apple SpeechAnalyzer did not provide a compatible audio format."
         case .conversion: "Audio conversion for Apple SpeechAnalyzer failed."
+        case let .assetReservationUnavailable(locale): "macOS cannot reserve \(nativeSpeechLanguageLabel(locale)) Speech assets. Free storage or select an already installed language, then try again."
         case let .assetInstallationFailed(locale): "macOS could not install \(nativeSpeechLanguageLabel(locale)) Speech assets. Check your internet connection and available storage, then try again."
         }
     }
+}
+
+@available(macOS 26.0, *)
+func nativeSpeechReservationToRelease(
+    targetLocale: Locale,
+    reservedLocales: [Locale],
+    maximumReservedLocales: Int
+) -> Locale? {
+    let targetIdentifier = targetLocale.identifier(.bcp47)
+    guard maximumReservedLocales > 0,
+          !reservedLocales.contains(where: { $0.identifier(.bcp47) == targetIdentifier }),
+          reservedLocales.count >= maximumReservedLocales else {
+        return nil
+    }
+    return reservedLocales
+        .filter { $0.identifier(.bcp47) != targetIdentifier }
+        .sorted { $0.identifier(.bcp47) < $1.identifier(.bcp47) }
+        .first
 }
 
 enum NativeAppleSpeech {
@@ -143,6 +163,21 @@ enum NativeAppleSpeech {
         if status == .unsupported { throw NativeAppleSpeechError.unsupportedLocale(language) }
         if status != .installed {
             try Task.checkCancellation()
+            let reservedLocales = await AssetInventory.reservedLocales
+            let maximumReservedLocales = AssetInventory.maximumReservedLocales
+            let targetIdentifier = locale.identifier(.bcp47)
+            let targetIsReserved = reservedLocales.contains {
+                $0.identifier(.bcp47) == targetIdentifier
+            }
+            if !targetIsReserved, reservedLocales.count >= maximumReservedLocales {
+                guard let releaseLocale = nativeSpeechReservationToRelease(
+                    targetLocale: locale,
+                    reservedLocales: reservedLocales,
+                    maximumReservedLocales: maximumReservedLocales
+                ), await AssetInventory.release(reservedLocale: releaseLocale) else {
+                    throw NativeAppleSpeechError.assetReservationUnavailable(language)
+                }
+            }
             do {
                 if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
                     try await request.downloadAndInstall()
@@ -150,6 +185,13 @@ enum NativeAppleSpeech {
             } catch let error as CancellationError {
                 throw error
             } catch {
+                let currentReservations = await AssetInventory.reservedLocales
+                let reservationUnavailable = !currentReservations.contains {
+                    $0.identifier(.bcp47) == targetIdentifier
+                } && currentReservations.count >= AssetInventory.maximumReservedLocales
+                if reservationUnavailable {
+                    throw NativeAppleSpeechError.assetReservationUnavailable(language)
+                }
                 throw NativeAppleSpeechError.assetInstallationFailed(language)
             }
             try Task.checkCancellation()

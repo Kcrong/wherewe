@@ -9,6 +9,8 @@ const ROOT = path.resolve(__dirname, "../..");
 const read = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
 
 const recording = read("macos/Sources/MeetingTranscriberCore/NativeServiceRecording.swift");
+const service = read("macos/Sources/MeetingTranscriberCore/NativeService.swift");
+const settings = read("macos/Sources/MeetingTranscriberCore/NativeServiceSettings.swift");
 const realtime = read("macos/Sources/MeetingTranscriberCore/NativeRealtimeClient.swift");
 
 function between(source, start, end) {
@@ -27,8 +29,14 @@ test("recording ownership is revalidated after every persistence suspension", ()
 
   assert.match(start, /speechPreparation\(language: request\.language\)[\s\S]*APPLE_SPEECH_NOT_READY/);
   assert.match(start, /Task\.checkCancellation\(\)[\s\S]*if let claim = recordingClaim/);
-  assert.match(start, /let update = try requireDatabase\(\)\.run[\s\S]*guard update\.changes == 1[\s\S]*recordingGeneration = nextGeneration[\s\S]*recordingClaim = claim/);
-  assert.match(recording, /func requireCurrentRecordingClaim\(/);
+  assert.match(start, /let initialDatabase = try requireDatabase\(\)[\s\S]*speechAssetPreparationLanguage == nil[\s\S]*recordingStartLanguages\[startToken\] = request\.language[\s\S]*defer \{ recordingStartLanguages\.removeValue/);
+  assert.match(start, /speechPreparation\(language: request\.language\)[\s\S]*guard databaseStorage === initialDatabase[\s\S]*RECORDING_CONTEXT_CHANGED/);
+  assert.match(start, /let update = try initialDatabase\.run[\s\S]*guard update\.changes == 1[\s\S]*recordingGeneration = nextGeneration[\s\S]*recordingClaim = claim/);
+  assert.match(service, /var speechAssetPreparationLanguage: String\?[\s\S]*var recordingStartLanguages: \[UUID: String\]/);
+  assert.match(settings, /importSettings\([\s\S]*recordingClaim == nil, recordingStartLanguages\.isEmpty[\s\S]*settingsStore\.importData/);
+  assert.match(settings, /updateSettings\([\s\S]*guard recordingStartLanguages\.isEmpty[\s\S]*settingsStore\.update/);
+  assert.match(settings, /recordingClaim == nil[\s\S]*recordingStartLanguages\.isEmpty[\s\S]*speechAssetPreparationLanguage == nil[\s\S]*speechAssetPreparationLanguage = language[\s\S]*defer \{ speechAssetPreparationLanguage = nil \}[\s\S]*speechService\.prepare/);
+  assert.match(recording, /func requireCurrentRecordingClaim\([\s\S]*claim\.language == request\.language[\s\S]*claim\.translationTarget == canonicalLanguage\(request\.translationTarget\)/);
   assert.match(commit, /await transcribe\([\s\S]*requireCurrentRecordingClaim\(/);
   assert.match(persist, /await translateText\([\s\S]*requireCurrentRecordingClaim\([\s\S]*INSERT INTO transcripts/);
   assert.match(finish, /commitRealtimeChunk\([\s\S]*requireCurrentRecordingClaim\(/);

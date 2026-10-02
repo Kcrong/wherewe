@@ -13,6 +13,8 @@ public actor NativeService: NativeServiceServing {
     var connectedClientIDs: Set<String> = []
     var recordingClaim: NativeRecordingClaim?
     var recordingGeneration: Int64 = 0
+    var speechAssetPreparationLanguage: String?
+    var recordingStartLanguages: [UUID: String] = [:]
     var recordingLifecycleObserver = NativeRecordingLifecycleObserver()
     var exportLifecycleObserver = NativeExportLifecycleObserver()
 

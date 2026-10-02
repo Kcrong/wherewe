@@ -21,6 +21,13 @@ extension NativeService {
     }
 
     public func importSettings(_ data: Data, etag: String?) async throws -> SettingsEnvelope {
+        guard recordingClaim == nil, recordingStartLanguages.isEmpty else {
+            throw NativeServiceError.server(
+                status: 409,
+                code: "SETTINGS_TRANSCRIPTION_ACTIVE",
+                message: "Stop recording or wait for recording startup to finish before importing settings."
+            )
+        }
         let envelope = try settingsStore.importData(data, etag: etag)
         try replaceDatabase(for: envelope.document)
         startupError = nil
@@ -31,6 +38,13 @@ extension NativeService {
         _ request: SettingsUpdateRequest,
         etag: String?
     ) async throws -> SettingsEnvelope {
+        guard recordingStartLanguages.isEmpty else {
+            throw NativeServiceError.server(
+                status: 409,
+                code: "SETTINGS_TRANSCRIPTION_ACTIVE",
+                message: "Wait for recording startup to finish before changing settings."
+            )
+        }
         if recordingClaim != nil, settingsStore.isConfigured {
             let current = try settingsStore.envelope().document.updateRequest
             if current.transcription != request.transcription || current.paths != request.paths {
@@ -45,6 +59,10 @@ extension NativeService {
         try replaceDatabase(for: envelope.document)
         startupError = nil
         return envelope
+    }
+
+    public func transcriptionCatalogue() async throws -> TranscriptionCatalogueResponse {
+        try await transcriptionCatalogue(language: "en-US")
     }
 
     public func transcriptionCatalogue(language: String) async throws -> TranscriptionCatalogueResponse {
@@ -104,6 +122,13 @@ extension NativeService {
 
     public func prepareTranscription(
         provider: String,
+        model: String
+    ) async throws -> TranscriptionCatalogueResponse {
+        try await prepareTranscription(provider: provider, model: model, language: "en-US")
+    }
+
+    public func prepareTranscription(
+        provider: String,
         model: String,
         language: String
     ) async throws -> TranscriptionCatalogueResponse {
@@ -114,6 +139,17 @@ extension NativeService {
                 message: "Apple Speech with the system model is the only supported transcription selection."
             )
         }
+        guard recordingClaim == nil,
+              recordingStartLanguages.isEmpty,
+              speechAssetPreparationLanguage == nil else {
+            throw NativeServiceError.server(
+                status: 409,
+                code: "APPLE_SPEECH_PREPARATION_ACTIVE",
+                message: "Wait for recording startup or recording to finish before installing Speech assets."
+            )
+        }
+        speechAssetPreparationLanguage = language
+        defer { speechAssetPreparationLanguage = nil }
         try await speechService.prepare(
             language: language,
             mode: "live",

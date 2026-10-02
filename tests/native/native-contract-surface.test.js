@@ -52,10 +52,22 @@ test("machine-readable service methods exactly match the Swift protocol", () => 
   assert.equal(contract.transport, "in-process");
   assert.equal(contract.minimumMacOS, "26.0");
   const serviceProtocol = body(protocol, "public protocol NativeServiceServing", "public extension NativeServiceServing");
-  const swiftMethods = [...serviceProtocol.matchAll(/\bfunc\s+([A-Za-z_][A-Za-z0-9_]*)\b/g)]
-    .map((match) => match[1])
-    .sort();
+  const swiftMethods = [...new Set(
+    [...serviceProtocol.matchAll(/\bfunc\s+([A-Za-z_][A-Za-z0-9_]*)\b/g)]
+      .map((match) => match[1]),
+  )].sort();
   assert.deepEqual([...contract.serviceMethods].sort(), swiftMethods);
+  assert.match(serviceProtocol, /func transcriptionCatalogue\(\) async throws/);
+  assert.match(serviceProtocol, /func transcriptionCatalogue\(language: String\) async throws/);
+  assert.match(serviceProtocol, /func prepareTranscription\(provider: String, model: String\) async throws/);
+  assert.match(serviceProtocol, /func prepareTranscription\(provider: String, model: String, language: String\) async throws/);
+  const compatibilityDefaults = body(
+    protocol,
+    "public extension NativeServiceServing",
+    "public enum NativeServiceError",
+  );
+  assert.match(compatibilityDefaults, /transcriptionCatalogue\(language: String\)[\s\S]*transcriptionCatalogue\(\)/);
+  assert.match(compatibilityDefaults, /prepareTranscription\([\s\S]*language: String[\s\S]*prepareTranscription\(provider: provider, model: model\)/);
 });
 
 test("realtime methods and events have exact bidirectional parity", () => {

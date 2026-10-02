@@ -51,9 +51,8 @@ extension NativeService {
         request: StartRecordingRequest
     ) async throws -> StartRecordingResponse {
         _ = try await meeting(id: meetingID)
-        let selection = try settingsStore.envelope().document.transcription.local
-        let apple = selection.apple ?? AppleSpeechSettings()
         if let claim = recordingClaim {
+            let apple = try settingsStore.envelope().document.transcription.local.apple ?? AppleSpeechSettings()
             if claim.meetingID == meetingID, claim.clientID == request.socketID {
                 return StartRecordingResponse(
                     success: true,
@@ -69,6 +68,17 @@ extension NativeService {
             }
             throw NativeServiceError.server(status: 409, code: "RECORDING_ACTIVE", message: "Another recording is active.")
         }
+        let initialDatabase = try requireDatabase()
+        guard speechAssetPreparationLanguage == nil else {
+            throw NativeServiceError.server(
+                status: 409,
+                code: "APPLE_SPEECH_PREPARATION_ACTIVE",
+                message: "Wait for Speech asset installation to finish before recording."
+            )
+        }
+        let startToken = UUID()
+        recordingStartLanguages[startToken] = request.language
+        defer { recordingStartLanguages.removeValue(forKey: startToken) }
         let preparation = await speechPreparation(language: request.language)
         guard preparation.state == "ready" else {
             throw NativeServiceError.server(
@@ -79,6 +89,7 @@ extension NativeService {
         }
         try Task.checkCancellation()
         if let claim = recordingClaim {
+            let apple = try settingsStore.envelope().document.transcription.local.apple ?? AppleSpeechSettings()
             if claim.meetingID == meetingID, claim.clientID == request.socketID {
                 return StartRecordingResponse(
                     success: true,
@@ -94,6 +105,14 @@ extension NativeService {
             }
             throw NativeServiceError.server(status: 409, code: "RECORDING_ACTIVE", message: "Another recording is active.")
         }
+        guard databaseStorage === initialDatabase else {
+            throw NativeServiceError.server(
+                status: 409,
+                code: "RECORDING_CONTEXT_CHANGED",
+                message: "Settings changed while recording was starting. Try again."
+            )
+        }
+        let apple = try settingsStore.envelope().document.transcription.local.apple ?? AppleSpeechSettings()
         let nextGeneration = recordingGeneration + 1
         let claim = NativeRecordingClaim(
             meetingID: meetingID,
@@ -102,7 +121,7 @@ extension NativeService {
             language: request.language,
             translationTarget: canonicalLanguage(request.translationTarget)
         )
-        let update = try requireDatabase().run(
+        let update = try initialDatabase.run(
             "UPDATE meetings SET lang = ?, translate_to = ?, ended_at = NULL WHERE id = ?",
             [.text(request.language), .text(claim.translationTarget), .integer(Int64(meetingID))]
         )
@@ -386,7 +405,9 @@ extension NativeService {
         guard let claim = recordingClaim,
               claim.meetingID == request.meetingID,
               claim.generation == request.generation,
-              claim.clientID == clientID else {
+              claim.clientID == clientID,
+              claim.language == request.language,
+              claim.translationTarget == canonicalLanguage(request.translationTarget) else {
             throw NativeServiceError.server(
                 status: 409,
                 code: "RECORDING_CLAIM_STALE",
