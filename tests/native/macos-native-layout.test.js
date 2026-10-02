@@ -33,6 +33,44 @@ test("settings expose fixed Apple providers and supported storage paths", () => 
   assert.match(model, /provider: "apple",\s*model: "system"/);
 });
 
+test("Command-comma opens one system Settings window with current app state", () => {
+  const appScene = view.slice(view.indexOf("@main"), view.indexOf("private struct RootView"));
+  const rootView = swiftView("RootView", "SettingsView");
+  const settingsView = swiftView("SettingsView", "SettingsPage<Content: View>");
+  const saveStart = model.indexOf("func saveSettings() async -> Bool {");
+  const saveEnd = model.indexOf("\n    func refreshAudioDevices()", saveStart);
+  assert.notEqual(saveStart, -1, "missing saveSettings");
+  assert.ok(saveEnd > saveStart, "missing saveSettings boundary");
+  const saveSettings = model.slice(saveStart, saveEnd);
+
+  assert.equal((appScene.match(/\n\s*Settings \{/g) || []).length, 1);
+  assert.equal((appScene.match(/\n\s*SettingsView\(model: model\)/g) || []).length, 1);
+  assert.match(
+    appScene,
+    /Settings \{\s*SettingsView\(model: model\)[\s\S]{0,120}\.task \{ await model\.loadSettings\(\) \}/
+  );
+  assert.match(rootView, /@Environment\(\\\.openSettings\) private var openSettings/);
+  assert.match(
+    rootView,
+    /\.toolbar \{[\s\S]{0,260}Button \{\s*openSettings\(\)\s*\} label: \{\s*Label\("Settings"/
+  );
+  assert.match(rootView, /\.onChange\(of: model\.phase\)[\s\S]{0,160}phase == \.setupRequired[\s\S]{0,80}openSettings\(\)/);
+  assert.doesNotMatch(view, /\.sheet\([^\n]*showingSettings|Window(?:Group)?\("Settings"/);
+  assert.match(settingsView, /@Environment\(\\\.dismiss\) private var dismiss/);
+  assert.match(settingsView, /Button\("Done"\) \{ dismiss\(\) \}/);
+  assert.match(settingsView, /if await model\.saveSettings\(\)[\s\S]{0,80}dismiss\(\)/);
+  assert.match(settingsView, /\.preferredColorScheme\(model\.theme\.colorScheme\)/);
+  assert.match(model, /if health\.setupRequired \{\s*initialSetupCompletionPending = true/);
+  assert.match(model, /initialSetupCompletionPending = false\s*phase = \.ready/);
+  assert.match(saveSettings, /let completesInitialSetup = initialSetupCompletionPending \|\| settingsDocument\?\.configured != true/);
+  assert.match(saveSettings, /api\.transcriptionCatalogue\(language: catalogueLanguage\)/);
+  assert.match(saveSettings, /if completesInitialSetup \{\s*await connect\(\)\s*return phase == \.ready/);
+  assert.equal((saveSettings.match(/return phase == \.ready/g) || []).length, 1);
+  assert.doesNotMatch(saveSettings, /return true/);
+  assert.match(model, /refreshTranscriptionReadiness\([\s\S]{0,100}reportToSettings: Bool = false/);
+  assert.doesNotMatch(model, /showingSettings|func openSettings\(|api\.transcriptionCatalogue\(\)/);
+});
+
 test("meeting and CoreAudio recording controls remain available", () => {
   assert.match(view, /TextField\("Search meetings"/);
   assert.match(view, /Label\("New Meeting", systemImage: "plus"\)/);

@@ -91,7 +91,6 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var exportResult: MeetingExportResponse?
 
-    @Published var showingSettings = false
     @Published var settingsDraft: SettingsUpdateRequest?
     @Published private(set) var settingsDocument: SettingsDocument?
     @Published private(set) var settingsETag: String?
@@ -157,6 +156,7 @@ final class AppModel: ObservableObject {
     private var meetingLoadGeneration = 0
     private var restoringMeetingValues = false
     private var suppressDisconnectRecovery = false
+    private var initialSetupCompletionPending = false
     private var completedDrainTokens = Set<UUID>()
     private var drainWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
@@ -263,10 +263,9 @@ final class AppModel: ObservableObject {
         do {
             let health = try await api.health()
             if health.setupRequired {
+                initialSetupCompletionPending = true
                 meetings = []
                 phase = .setupRequired
-                await loadSettings()
-                showingSettings = true
                 return
             }
 
@@ -299,6 +298,7 @@ final class AppModel: ObservableObject {
             if selectedMeetingID == nil {
                 selectedMeetingID = meetings.first?.id
             }
+            initialSetupCompletionPending = false
             phase = .ready
         } catch {
             meetings = []
@@ -706,11 +706,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func openSettings() async {
-        await loadSettings()
-        showingSettings = true
-    }
-
     func loadSettings() async {
         guard !settingsInProgress else { return }
         settingsInProgress = true
@@ -755,13 +750,16 @@ final class AppModel: ObservableObject {
         transcriptionCatalogueLanguage = language
     }
 
-    private func refreshTranscriptionReadiness(for language: String) async {
+    private func refreshTranscriptionReadiness(
+        for language: String,
+        reportToSettings: Bool = false
+    ) async {
         do {
             let catalogue = try await api.transcriptionCatalogue(language: language)
             applyTranscriptionCatalogue(catalogue, for: language)
         } catch {
             guard recognitionLanguage == language else { return }
-            if showingSettings {
+            if reportToSettings {
                 settingsError = error.localizedDescription
             } else {
                 recordingError = error.localizedDescription
@@ -804,10 +802,16 @@ final class AppModel: ObservableObject {
             if recognitionLanguage == language {
                 applyTranscriptionCatalogue(catalogue, for: language)
             } else {
-                await refreshTranscriptionReadiness(for: recognitionLanguage)
+                await refreshTranscriptionReadiness(
+                    for: recognitionLanguage,
+                    reportToSettings: true
+                )
             }
         } catch is CancellationError {
-            await refreshTranscriptionReadiness(for: recognitionLanguage)
+            await refreshTranscriptionReadiness(
+                for: recognitionLanguage,
+                reportToSettings: true
+            )
         } catch {
             settingsError = error.localizedDescription
         }
@@ -830,12 +834,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func saveSettings() async {
-        guard var draft = settingsDraft, !settingsInProgress else { return }
+    // Returns true only when first-run setup completed and the Settings window should close.
+    func saveSettings() async -> Bool {
+        guard var draft = settingsDraft, !settingsInProgress else { return false }
         guard (draft.paths.database as NSString).isAbsolutePath,
               (draft.paths.files as NSString).isAbsolutePath else {
             settingsError = "Storage paths must be absolute."
-            return
+            return false
         }
 
         draft.transcription.engine = "apple"
@@ -852,7 +857,8 @@ final class AppModel: ObservableObject {
 
         settingsInProgress = true
         settingsError = nil
-        let wasConfigured = settingsDocument?.configured == true
+        defer { settingsInProgress = false }
+        let completesInitialSetup = initialSetupCompletionPending || settingsDocument?.configured != true
         do {
             let envelope = try await api.updateSettings(draft, etag: settingsETag)
             settingsDocument = envelope.document
@@ -861,16 +867,14 @@ final class AppModel: ObservableObject {
             let catalogueLanguage = recognitionLanguage
             let catalogue = try await api.transcriptionCatalogue(language: catalogueLanguage)
             applyTranscriptionCatalogue(catalogue, for: catalogueLanguage)
-            if !wasConfigured {
-                showingSettings = false
-                settingsInProgress = false
+            if completesInitialSetup {
                 await connect()
-                return
+                return phase == .ready
             }
         } catch {
             settingsError = error.localizedDescription
         }
-        settingsInProgress = false
+        return false
     }
 
     func refreshAudioDevices() {

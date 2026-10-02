@@ -10,6 +10,16 @@ private enum NativeLayoutMetrics {
     static let workspaceMinimumHeight: CGFloat = 280
 }
 
+private extension NativePreferences.Theme {
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
 @main
 struct MeetingTranscriberApp: App {
     @StateObject private var model = AppModel()
@@ -32,11 +42,17 @@ struct MeetingTranscriberApp: App {
                 .disabled(model.phase != .ready)
             }
         }
+
+        Settings {
+            SettingsView(model: model)
+                .task { await model.loadSettings() }
+        }
     }
 }
 
 private struct RootView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         NavigationSplitView {
@@ -70,7 +86,7 @@ private struct RootView: View {
             .navigationTitle("Meetings")
             .toolbar {
                 Button {
-                    Task { await model.openSettings() }
+                    openSettings()
                 } label: {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -95,10 +111,12 @@ private struct RootView: View {
         .sheet(isPresented: $model.showingNewMeeting) {
             NewMeetingView(model: model)
         }
-        .sheet(isPresented: $model.showingSettings) {
-            SettingsView(model: model)
+        .preferredColorScheme(model.theme.colorScheme)
+        .onChange(of: model.phase) { _, phase in
+            if phase == .setupRequired {
+                openSettings()
+            }
         }
-        .preferredColorScheme(preferredColorScheme)
     }
 
     @ViewBuilder
@@ -114,7 +132,7 @@ private struct RootView: View {
                 systemImage: "gearshape.2",
                 message: "Configure Apple Speech, Apple Translation, and local storage before using the app.",
                 actionTitle: "Open Settings",
-                action: { Task { await model.openSettings() } }
+                action: { openSettings() }
             )
             .accessibilityIdentifier("setup-required")
         case .ready:
@@ -143,14 +161,6 @@ private struct RootView: View {
         }
     }
 
-    private var preferredColorScheme: ColorScheme? {
-        switch model.theme {
-        case .system: nil
-        case .light: .light
-        case .dark: .dark
-        }
-    }
-
     private var meetingSelection: Binding<Int?> {
         Binding(
             get: { model.selectedMeetingID },
@@ -161,6 +171,7 @@ private struct RootView: View {
 
 private struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 14) {
@@ -180,7 +191,7 @@ private struct SettingsView: View {
                 .pickerStyle(.menu)
                 .frame(minWidth: 108)
                 if model.settingsDocument?.configured == true {
-                    Button("Done") { model.showingSettings = false }
+                    Button("Done") { dismiss() }
                 }
             }
 
@@ -214,7 +225,11 @@ private struct SettingsView: View {
                 Spacer()
                 if model.settingsInProgress { ProgressView().controlSize(.small) }
                 Button("Save Settings") {
-                    Task { await model.saveSettings() }
+                    Task {
+                        if await model.saveSettings() {
+                            dismiss()
+                        }
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.settingsInProgress || model.settingsDraft == nil)
@@ -222,9 +237,7 @@ private struct SettingsView: View {
         }
         .padding(20)
         .frame(minWidth: 720, minHeight: 600)
-        .interactiveDismissDisabled(
-            model.settingsInProgress || model.settingsDocument?.configured != true
-        )
+        .preferredColorScheme(model.theme.colorScheme)
     }
 }
 
