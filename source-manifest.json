@@ -2,7 +2,7 @@
   "schema_version": 1,
   "purpose": "Classify every source-controlled Wherewe file and reject unlisted, sensitive, local, or generated content.",
   "generated_on": "2026-10-01",
-  "expected_files": 104,
+  "expected_files": 105,
   "default_file_mode": "100644",
   "files": [
     ".github/workflows/release-macos.yml",
@@ -90,6 +90,7 @@
     "macos/contract.json",
     "scripts/build-macos-app.sh",
     "scripts/build-macos-dmg.sh",
+    "scripts/generate-release-notes.sh",
     "scripts/pre-push-macos.sh",
     "scripts/scan-public-content.js",
     "scripts/test-macos-app-bundle.sh",

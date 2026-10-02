@@ -8,7 +8,7 @@ proves. Source inventories are checked by `testing-strategy.test.js`.
 - Swift test sources: 24 files, 21 suites, 72 declared tests.
 - Deterministic Swift baseline: 67 tests.
 - Opt-in Swift runtime and hardware checks: 5 tests across 3 environment keys.
-- Node source contracts: 13 files, 55 declared tests.
+- Node source contracts: 13 files, 56 declared tests.
 - `MeetingTranscriberCoreChecks` is a separate executable smoke contract.
 - App and DMG checks are shell integration tests, not GUI automation.
 
@@ -72,7 +72,7 @@ Repository security, privacy, and strategy contracts:
 | Pull request and `main` push | Linux syntax/scanner/contracts followed by macOS 26 ARM64 Swift build, unit tests, and core checks |
 | Manual Test dispatch | Automatic evidence, an advisory Apple runtime probe, app launch/relaunch, DMG mount verification, and a directly downloadable `.dmg` artifact retained for 7 days |
 | Local pre-push gate | Deterministic tests plus required real Apple Speech and Translation evidence, app launch/relaunch, and DMG mount verification |
-| Release workflow | Pre-secret release gate with required real Apple runtime evidence, then Developer ID signing, notarisation, stapling, Gatekeeper assessment, checksum, and release upload |
+| Release workflow | Pre-secret deterministic and packaging gate with an advisory Apple runtime probe, then Developer ID signing, notarisation, DMG verification, and draft release upload |
 | Physical hardware run | Two explicit microphone/system-input route tests on a prepared Mac |
 
 The local gate is:
@@ -95,8 +95,8 @@ not a signed release.
 
 | Environment key | Tests | Scripted requirement |
 | --- | ---: | --- |
-| `WHEREWE_NATIVE_REAL_APPLE_SPEECH` | 2 | Required by local and release gates; manual Test uses advisory `auto` mode |
-| `WHEREWE_NATIVE_REAL_APPLE_TRANSLATION` | 1 | Required by local and release gates; manual Test uses advisory `auto` mode |
+| `WHEREWE_NATIVE_REAL_APPLE_SPEECH` | 2 | Required by the local gate; Test and release workflows use advisory `auto` mode |
+| `WHEREWE_NATIVE_REAL_APPLE_TRANSLATION` | 1 | Required by the local gate; Test and release workflows use advisory `auto` mode |
 | `WHEREWE_NATIVE_REAL_HARDWARE` | 2 | Explicit physical-Mac run only |
 
 Stable success markers:
@@ -107,10 +107,10 @@ Stable success markers:
 - `physical-dual-input`
 - `physical-system-only`
 
-The first three markers are required by local and release gates. Manual Test
-reports what the hosted runner can use but still packages the DMG when those
-assets are unavailable. A marker counts only when the filtered Swift command
-also exits successfully.
+The first three markers are required by the local gate. Manual Test and release
+workflows report what the hosted runner can use but still package a DMG when those
+assets are unavailable. A marker counts only when the filtered Swift command also
+exits successfully.
 
 ## Risk and evidence matrix
 
@@ -119,7 +119,7 @@ also exits successfully.
 | Repository source safety | Exact manifest, redacted scanner, identity and privacy contracts | Re-run on every change |
 | Meeting and SQLite behavior | Service, migration, mutation, translation, and core-check suites | Execute on supported macOS hardware |
 | CoreAudio and realtime ownership | Deterministic framing/synchronization suites and generation fencing | Hardware, TCC, route changes, unplug, and sleep/wake remain manual |
-| Apple Speech and Translation | Advisory hosted probe plus required local/release generated-speech and installed-pack evidence | Test the downloadable DMG with installed assets on a real Mac |
+| Apple Speech and Translation | Advisory hosted probes plus required local generated-speech and installed-pack evidence | Test each draft-release DMG with installed assets on a real Mac before publishing |
 | Storage and attachments | Path-policy contracts plus security tests | Add user-facing permission-error coverage |
 | Export rollback | Collision and cancellation tests require complete partial-directory removal | Add destination-selection GUI coverage if introduced |
 | Retry and recovery | Translation restart and recording finalisation tests | Keep retries explicit and bounded |

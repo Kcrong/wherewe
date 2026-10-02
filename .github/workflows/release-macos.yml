@@ -10,17 +10,12 @@ on:
         description: Existing vMAJOR.MINOR.PATCH tag to release
         required: true
         type: string
-      prerelease:
-        description: Mark the GitHub Release as a prerelease
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: write
 
 concurrency:
-  group: macos-release-${{ github.ref_name }}-${{ inputs.release_tag || 'tag' }}
+  group: macos-release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -36,6 +31,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 
       - name: Configure release paths
@@ -50,10 +46,7 @@ jobs:
             echo "WHEREWE_NATIVE_SMOKE_ROOT=$RUNNER_TEMP/native-app-smoke"
           } >> "$GITHUB_ENV"
 
-      - name: Run complete non-secret release gate
-        run: bash scripts/test-release-prerequisites.sh
-
-      - name: Resolve and validate release metadata
+      - name: Validate release tag before repository scripts
         env:
           DISPATCH_TAG: ${{ inputs.release_tag }}
         run: |
@@ -68,24 +61,38 @@ jobs:
           }
           TAG_COMMIT="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
           git fetch --no-tags origin main:refs/remotes/origin/main
-          [[ "$TAG_COMMIT" == "$(git rev-parse origin/main)" ]] || {
-            echo "Release tag must point to the current origin/main commit." >&2
+          git merge-base --is-ancestor "$TAG_COMMIT" origin/main || {
+            echo "Release tag must belong to the current origin/main history." >&2
             exit 1
           }
           [[ "$MACOS_BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] || {
             echo "MACOS_BUNDLE_IDENTIFIER must remain a permanent reverse-DNS identifier." >&2
             exit 1
           }
-          RELEASE_VERSION="${RELEASE_TAG#v}"
+          {
+            echo "RELEASE_TAG=$RELEASE_TAG"
+            echo "RELEASE_VERSION=${RELEASE_TAG#v}"
+            echo "TAG_COMMIT=$TAG_COMMIT"
+          } >> "$GITHUB_ENV"
+
+      - name: Run complete non-secret release gate
+        run: bash scripts/test-release-prerequisites.sh
+
+      - name: Apply release metadata
+        run: |
           /usr/bin/plutil -replace CFBundleIdentifier -string "$MACOS_BUNDLE_IDENTIFIER" macos/Resources/Info.plist
           /usr/bin/plutil -replace CFBundleShortVersionString -string "$RELEASE_VERSION" macos/Resources/Info.plist
           /usr/bin/plutil -replace CFBundleVersion -string "$GITHUB_RUN_NUMBER" macos/Resources/Info.plist
           {
-            echo "RELEASE_TAG=$RELEASE_TAG"
-            echo "RELEASE_VERSION=$RELEASE_VERSION"
             echo "WHEREWE_NATIVE_APP_PATH=$WHEREWE_NATIVE_DIST_DIR/Wherewe.app"
             echo "WHEREWE_DMG_PATH=$WHEREWE_DMG_OUTPUT_DIR/Wherewe-$RELEASE_VERSION-arm64.dmg"
           } >> "$GITHUB_ENV"
+
+      - name: Generate release notes from commit messages
+        run: |
+          RELEASE_NOTES_PATH="$RUNNER_TEMP/wherewe-$RELEASE_TAG-notes.md"
+          bash scripts/generate-release-notes.sh "$RELEASE_TAG" "$RELEASE_NOTES_PATH"
+          echo "RELEASE_NOTES_PATH=$RELEASE_NOTES_PATH" >> "$GITHUB_ENV"
 
       - name: Require release credentials
         env:
@@ -189,28 +196,45 @@ jobs:
             > "$(basename "$WHEREWE_DMG_PATH").sha256"
           /usr/bin/shasum -a 256 -c "$(basename "$WHEREWE_DMG_PATH").sha256"
 
-      - name: Create or update GitHub Release
+      - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           CHECKSUM_PATH="$WHEREWE_DMG_PATH.sha256"
+          [[ -s "$RELEASE_NOTES_PATH" ]] || {
+            echo "Release notes were not generated." >&2
+            exit 1
+          }
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$WHEREWE_DMG_PATH" "$CHECKSUM_PATH" --clobber
-          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$PRERELEASE" == "true" ]]; then
-            gh release create "$RELEASE_TAG" \
-              "$WHEREWE_DMG_PATH" "$CHECKSUM_PATH" \
-              --verify-tag \
-              --title "Wherewe $RELEASE_VERSION" \
-              --generate-notes \
-              --prerelease
-          else
-            gh release create "$RELEASE_TAG" \
-              "$WHEREWE_DMG_PATH" "$CHECKSUM_PATH" \
-              --verify-tag \
-              --title "Wherewe $RELEASE_VERSION" \
-              --generate-notes
+            echo "Release $RELEASE_TAG already exists; refusing to modify it." >&2
+            exit 1
           fi
+          gh release create "$RELEASE_TAG" \
+            "$WHEREWE_DMG_PATH" "$CHECKSUM_PATH" \
+            --verify-tag \
+            --draft \
+            --title "Wherewe $RELEASE_VERSION" \
+            --notes-file "$RELEASE_NOTES_PATH"
+          RELEASE_URL="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
+          {
+            echo '## Draft release created'
+            echo
+            echo "[$RELEASE_TAG]($RELEASE_URL)"
+            echo
+            echo "Attached: \`$(basename "$WHEREWE_DMG_PATH")\` and \`$(basename "$CHECKSUM_PATH")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Probe available Apple runtime assets
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          WHEREWE_NATIVE_REAL_APPLE_SPEECH: 'auto'
+          WHEREWE_NATIVE_REAL_APPLE_TRANSLATION: 'auto'
+        run: |
+          xcrun swift test \
+            --package-path macos \
+            --scratch-path "$WHEREWE_NATIVE_BUILD_DIR" \
+            --filter NativeRuntimeIntegrationTests
 
       - name: Delete temporary release keychain
         if: always()
