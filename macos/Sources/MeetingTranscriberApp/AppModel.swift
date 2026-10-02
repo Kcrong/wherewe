@@ -153,6 +153,11 @@ final class AppModel: ObservableObject {
     private var recordingTimerTask: Task<Void, Never>?
     private var captureStallTask: Task<Void, Never>?
     private var speechPreparationTask: Task<Void, Never>?
+    private var recordingStartTask: Task<Void, Never>?
+    private var recordingStopTask: Task<Void, Never>?
+    private var recordingRetryTask: Task<Void, Never>?
+    private var shutdownTask: Task<Bool, Never>?
+    private var terminationRequested = false
     private var levelMeter: CaptureLevelMeter?
     private var meetingLoadGeneration = 0
     private var restoringMeetingValues = false
@@ -259,6 +264,7 @@ final class AppModel: ObservableObject {
     var canStartRecording: Bool {
         phase == .ready
             && recordingPhase == .idle
+            && !terminationRequested
             && selectedMeetingID != nil
             && (selectedMicrophone != nil || selectedSystemInput != nil)
             && selectedTranscriptionReady
@@ -901,6 +907,21 @@ final class AppModel: ObservableObject {
     }
 
     func startRecording() async {
+        if let recordingStartTask {
+            await recordingStartTask.value
+            return
+        }
+        guard canStartRecording else { return }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performStartRecording()
+        }
+        recordingStartTask = task
+        await task.value
+        recordingStartTask = nil
+    }
+
+    private func performStartRecording() async {
         guard canStartRecording, let meetingID = selectedMeetingID else { return }
         let microphone = selectedMicrophone
         let systemInput = selectedSystemInput
@@ -957,6 +978,21 @@ final class AppModel: ObservableObject {
     }
 
     func stopRecording() async {
+        if let recordingStopTask {
+            await recordingStopTask.value
+            return
+        }
+        guard recordingPhase == .recording else { return }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performStopRecording()
+        }
+        recordingStopTask = task
+        await task.value
+        recordingStopTask = nil
+    }
+
+    private func performStopRecording() async {
         guard recordingPhase == .recording else { return }
         recordingPhase = .stopping
         stopRecordingTimer()
@@ -988,6 +1024,21 @@ final class AppModel: ObservableObject {
     }
 
     func retryFinalization() async {
+        if let recordingRetryTask {
+            await recordingRetryTask.value
+            return
+        }
+        guard !terminationRequested, recordingPhase == .recoveryRequired else { return }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRetryFinalization()
+        }
+        recordingRetryTask = task
+        await task.value
+        recordingRetryTask = nil
+    }
+
+    private func performRetryFinalization() async {
         guard recordingPhase == .recoveryRequired else { return }
         do {
             try await coordinator.connect()
@@ -1002,18 +1053,69 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func shutdown() {
-        suppressDisconnectRecovery = true
-        speechPreparationTask?.cancel()
-        Task {
-            realtimeEventTask?.cancel()
-            recordingTimerTask?.cancel()
-            captureStallTask?.cancel()
-            if let token = await capture.stop() { await waitUntilDrained(token) }
-            await coordinator.close()
-            frameTask?.cancel()
-            await api.shutdown()
+    func shutdown() async -> Bool {
+        if let shutdownTask {
+            return await shutdownTask.value
         }
+        terminationRequested = true
+        let task = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return true }
+            if let startTask = self.recordingStartTask {
+                await startTask.value
+            }
+            if Task.isCancelled {
+                self.terminationRequested = false
+                return false
+            }
+            if let stopTask = self.recordingStopTask {
+                await stopTask.value
+            }
+            if Task.isCancelled {
+                self.terminationRequested = false
+                return false
+            }
+            if let retryTask = self.recordingRetryTask {
+                await retryTask.value
+            }
+            if Task.isCancelled {
+                self.terminationRequested = false
+                return false
+            }
+            if self.recordingPhase == .recording {
+                await self.stopRecording()
+            }
+            if Task.isCancelled {
+                self.terminationRequested = false
+                return false
+            }
+            let coordinatorState = await self.coordinator.state
+            if Task.isCancelled {
+                self.terminationRequested = false
+                return false
+            }
+            guard self.recordingPhase == .idle, coordinatorState == .idle else {
+                self.terminationRequested = false
+                return false
+            }
+
+            self.speechPreparationTask?.cancel()
+            self.realtimeEventTask?.cancel()
+            self.recordingTimerTask?.cancel()
+            self.captureStallTask?.cancel()
+            self.frameTask?.cancel()
+            return true
+        }
+        shutdownTask = task
+        let shouldTerminate = await task.value
+        if !shouldTerminate {
+            shutdownTask = nil
+        }
+        return shouldTerminate
+    }
+
+    func cancelTerminationPreparation() {
+        shutdownTask?.cancel()
+        terminationRequested = false
     }
 
     private var preferredRecognitionLanguage: String {

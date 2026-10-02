@@ -122,6 +122,45 @@ test("hashed context and focused provider credentials are detected without reada
   }
   assert.deepEqual(scanner.scanText(`Tst0${"A".repeat(35)}`), []);
 
+  const platformCall = ["sender.", "rep", "ly(toApplicationShouldTerminate: shouldTerminate)"].join("");
+  const platformPath = "macos/Sources/MeetingTranscriberApp/MeetingTranscriberApp.swift";
+  const platformContext = [
+    "private func completeTermination(_ shouldTerminate: Bool, sender: NSApplication, id: UUID) {",
+    "guard terminationID == id else { return }",
+    "terminationID = nil",
+    "terminationDeadlineTask?.cancel()",
+    "terminationDeadlineTask = nil",
+    "terminationTask = nil",
+    platformCall,
+  ].join("\n");
+  assert.deepEqual(scanner.scanText(platformContext, platformPath), []);
+  const blockComment = ["/*", platformCall, "*/"].join("\n");
+  const nestedBlockComment = ["/* outer", "/* inner */", platformCall, "*/"].join("\n");
+  const multilineString = ['let value = """', platformCall, '"""'].join("\n");
+  const rawMultilineString = ['let value = #"""', '"""', platformCall, '"""#'].join("\n");
+  for (const mutation of [
+    `// ${platformCall}`,
+    blockComment,
+    nestedBlockComment,
+    multilineString,
+    rawMultilineString,
+    platformCall.toLowerCase(),
+    `${platformCall} extra`,
+    `${platformCall} // ${platformCall}`,
+    `${platformCall} /* ${platformCall} */`,
+    `/* ${platformCall} */ ${platformCall}`,
+    `/* outer /* inner */ ${platformCall} */ ${platformCall}`,
+    [platformContext, platformCall].join("\n"),
+    ["private func moved() {", platformCall, "}"].join("\n"),
+  ]) {
+    assert.ok(scanner.scanText(mutation, platformPath).some(
+      (item) => item.rule === "prohibited-context"
+    ));
+  }
+  assert.ok(scanner.scanText(platformCall, "other.swift").some(
+    (item) => item.rule === "prohibited-context"
+  ));
+
   const report = JSON.stringify([...contextFindings, ...credentialFindings]);
   for (const vector of blockedVectors) {
     assert.ok(!report.includes(String.fromCharCode(...vector)));
