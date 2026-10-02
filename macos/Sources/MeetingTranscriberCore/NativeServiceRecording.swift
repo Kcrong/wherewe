@@ -354,7 +354,11 @@ extension NativeService {
               translation_updated_at, lang_code, alternatives, confidence,
               transcription_engine, transcription_provider, transcription_model,
               transcription_mode, result_stage
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'apple', 'apple', 'system', ?, 'final')
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'apple', 'apple', 'system', ?, 'final'
+            WHERE NOT EXISTS (
+              SELECT 1 FROM transcripts WHERE meeting_id = ? AND result_id = ?
+            )
             """,
             [
                 .integer(Int64(request.meetingID)), .text(resultID), optionalText(channel),
@@ -365,12 +369,28 @@ extension NativeService {
                 .integer(translation.status == .notRequired ? 0 : 1), .text(updatedAt),
                 .text(request.language), .text(alternatives),
                 result.confidence.map(SQLiteValue.real) ?? .null, .text(mode),
+                .integer(Int64(request.meetingID)), .text(resultID),
             ]
         )
+        let databaseID: Int
+        if insert.changes == 1 {
+            databaseID = insert.lastInsertID
+        } else if let existingID = try database.first(
+            "SELECT id FROM transcripts WHERE meeting_id = ? AND result_id = ? ORDER BY id ASC LIMIT 1",
+            [.integer(Int64(request.meetingID)), .text(resultID)]
+        )?.int("id") {
+            databaseID = existingID
+        } else {
+            throw NativeServiceError.server(
+                status: 500,
+                code: "TRANSCRIPT_PERSISTENCE_FAILED",
+                message: nil
+            )
+        }
         let event = TranscriptionEvent(
             meetingID: request.meetingID,
             generation: request.generation,
-            databaseID: insert.lastInsertID,
+            databaseID: databaseID,
             resultID: resultID,
             transcript: result.text,
             isPartial: false,

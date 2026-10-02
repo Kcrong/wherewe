@@ -39,6 +39,7 @@ public enum RecordingCoordinatorState: Equatable, Sendable {
     case recording(RecordingClaim)
     case stopping(RecordingClaim)
     case recoveryRequired(RecordingClaim)
+    case retryingFinalization(RecordingClaim)
 }
 
 public enum RecordingCoordinatorError: Error, Equatable, LocalizedError, Sendable {
@@ -115,6 +116,8 @@ public actor RecordingCoordinator {
         } else if case let .awaitingAudio(claim) = state {
             state = .recoveryRequired(claim)
         } else if case let .stopping(claim) = state {
+            state = .recoveryRequired(claim)
+        } else if case let .retryingFinalization(claim) = state {
             state = .recoveryRequired(claim)
         }
     }
@@ -212,12 +215,18 @@ public actor RecordingCoordinator {
         let audioDeliveryConfirmed = barrier?.success == true
 
         var usedServiceFallback = false
-        let socketStop = try? await realtime.stopTranscription(
-            meetingID: claim.meetingID,
-            generation: claim.generation
-        )
-        var finalized = socketStop?.success == true || socketStop?.code == "RECORDING_CLAIM_STALE"
-        if !finalized {
+        let socketStop: RealtimeAcknowledgement
+        do {
+            socketStop = try await realtime.stopTranscription(
+                meetingID: claim.meetingID,
+                generation: claim.generation
+            )
+        } catch {
+            state = .recoveryRequired(claim)
+            throw error
+        }
+        var finalized = socketStop.success || socketStop.code == "RECORDING_CLAIM_STALE"
+        if !finalized, socketStop.code == "AUDIO_SESSION_UNAVAILABLE" {
             usedServiceFallback = true
             finalized = await finalizeClaimViaService(claim)
         }
@@ -238,7 +247,9 @@ public actor RecordingCoordinator {
         guard case let .recoveryRequired(claim) = state else {
             throw RecordingCoordinatorError.invalidState
         }
+        state = .retryingFinalization(claim)
         guard await finalizeClaim(claim) else {
+            state = .recoveryRequired(claim)
             throw RecordingCoordinatorError.finalizationUnconfirmed
         }
         framer = nil
@@ -321,14 +332,19 @@ public actor RecordingCoordinator {
     }
 
     private func finalizeClaim(_ claim: RecordingClaim) async -> Bool {
-        let acknowledgement = try? await realtime.stopTranscription(
-            meetingID: claim.meetingID,
-            generation: claim.generation
-        )
-        if acknowledgement?.success == true || acknowledgement?.code == "RECORDING_CLAIM_STALE" {
-            return true
+        do {
+            let acknowledgement = try await realtime.stopTranscription(
+                meetingID: claim.meetingID,
+                generation: claim.generation
+            )
+            if acknowledgement.success || acknowledgement.code == "RECORDING_CLAIM_STALE" {
+                return true
+            }
+            guard acknowledgement.code == "AUDIO_SESSION_UNAVAILABLE" else { return false }
+            return await finalizeClaimViaService(claim)
+        } catch {
+            return false
         }
-        return await finalizeClaimViaService(claim)
     }
 
     private func finalizeClaimViaService(_ claim: RecordingClaim) async -> Bool {
@@ -339,11 +355,6 @@ public actor RecordingCoordinator {
                 socketID: claim.socketID
             ))
             return result.success
-        } catch let error as NativeServiceError {
-            if case .server(status: 409, code: "RECORDING_CLAIM_STALE", message: _) = error {
-                return true
-            }
-            return false
         } catch {
             return false
         }

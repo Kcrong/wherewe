@@ -64,6 +64,40 @@ test("recording finalization retries preserve one claim and commit exactly once"
   assert.ok(fs.existsSync(regressionsPath), "missing finalization recovery regressions");
   const regressions = fs.readFileSync(regressionsPath, "utf8");
 
+  const realtimeStop = between(
+    realtime,
+    "public func stopTranscription(",
+    "private func makeAudioSession("
+  );
+  const coordinatorStop = between(
+    coordinator,
+    "public func stop()",
+    "public func retryFinalization()"
+  );
+  const finalizeClaim = between(
+    coordinator,
+    "private func finalizeClaim(",
+    "private func finalizeClaimViaService("
+  );
+  assert.match(realtimeStop, /recordingOwnedByRequester \|\| !status\.recordingOwnerConnected[\s\S]*AUDIO_SESSION_UNAVAILABLE[\s\S]*RECORDING_OWNED_BY_ANOTHER_CLIENT/);
+  assert.doesNotMatch(realtimeStop, /defer \{ try\? FileManager\.default\.removeItem/);
+  assert.match(realtimeStop, /finishRealtimeTranscription\([\s\S]*audioSession\?\.id == session\.id[\s\S]*audioSession = nil[\s\S]*removeItem/);
+  assert.doesNotMatch(coordinatorStop, /let socketStop = try\? await realtime\.stopTranscription/);
+  assert.match(coordinatorStop, /catch[\s\S]*state = \.recoveryRequired\(claim\)[\s\S]*throw/);
+  assert.match(coordinatorStop, /socketStop\.code == "AUDIO_SESSION_UNAVAILABLE"[\s\S]*finalizeClaimViaService/);
+  assert.doesNotMatch(finalizeClaim, /try\? await realtime\.stopTranscription/);
+  assert.match(finalizeClaim, /guard acknowledgement\.code == "AUDIO_SESSION_UNAVAILABLE" else \{ return false \}/);
+  assert.doesNotMatch(coordinator, /catch let error as NativeServiceError[\s\S]{0,240}RECORDING_CLAIM_STALE/);
+  assert.match(coordinator, /case retryingFinalization\(RecordingClaim\)/);
+  assert.match(coordinator, /func retryFinalization\(\)[\s\S]*state = \.retryingFinalization\(claim\)[\s\S]*state = \.recoveryRequired\(claim\)[\s\S]*state = \.idle/);
+  assert.match(recording, /WHERE NOT EXISTS \([\s\S]*meeting_id = \? AND result_id = \?[\s\S]*SELECT id FROM transcripts WHERE meeting_id = \? AND result_id = \?[\s\S]*databaseID: databaseID/);
+  assert.match(regressions, /verifyOwnedAudioRetry\(\)/);
+  assert.match(regressions, /verifyPartialPersistenceRetry\(\)/);
+  assert.match(regressions, /verifyConnectedOwnerIsNotFinalized\(\)/);
+  assert.match(regressions, /recordingOwnedByRequester/);
+  assert.match(regressions, /payloads\[0\] == payloads\[2\]/);
+  assert.match(regressions, /Recovered final transcript/);
+
   assert.match(observer, /beforeFinalizeRecording/);
   assert.match(
     recording,

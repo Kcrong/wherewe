@@ -278,36 +278,26 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         guard !withLock({ audioSession?.previewInFlight == true }) else {
             throw RealtimeClientError.acknowledgementTimedOut
         }
-        let session = withLock { () -> AudioSession? in
-            let value = audioSession
-            if value?.request.meetingID == meetingID,
-               value?.request.generation == generation {
-                audioSession = nil
-            }
-            return value
-        }
+        let session = withLock { audioSession }
         guard let session,
               session.request.meetingID == meetingID,
               session.request.generation == generation else {
             let status = try await service.recordingStatus(socketID: identifier.uuidString)
-            if status.recordingMeetingID == meetingID,
-               status.recordingGeneration == generation,
-               !status.recordingOwnerConnected {
-                _ = try await service.finalizeRecording(FinalizeRecordingRequest(
-                    meetingID: meetingID,
-                    generation: generation,
-                    socketID: identifier.uuidString
-                ))
+            guard status.recordingMeetingID == meetingID,
+                  status.recordingGeneration == generation else {
                 return RealtimeAcknowledgement(
-                    success: true,
-                    code: nil,
+                    success: false,
+                    code: "RECORDING_CLAIM_STALE",
                     meetingID: meetingID,
                     generation: generation
                 )
             }
+            let code = status.recordingOwnedByRequester || !status.recordingOwnerConnected
+                ? "AUDIO_SESSION_UNAVAILABLE"
+                : "RECORDING_OWNED_BY_ANOTHER_CLIENT"
             return RealtimeAcknowledgement(
                 success: false,
-                code: "RECORDING_CLAIM_STALE",
+                code: code,
                 meetingID: meetingID,
                 generation: generation
             )
@@ -315,13 +305,11 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         cancelPreviewTasks(for: session.id)
         cancelPreparationTasks(for: session.id)
         try session.handle.synchronize()
-        try session.handle.close()
         let audio = try readSpool(
             session.url,
             from: session.processedByteCount,
             to: session.byteCount
         )
-        defer { try? FileManager.default.removeItem(at: session.url) }
         do {
             let messages = try await service.finishRealtimeTranscription(
                 session.request,
@@ -329,6 +317,15 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
                 resultIDs: session.resultIDs,
                 clientID: identifier.uuidString
             )
+            let released = withLock { () -> Bool in
+                guard audioSession?.id == session.id else { return false }
+                audioSession = nil
+                return true
+            }
+            if released {
+                try? session.handle.close()
+                try? FileManager.default.removeItem(at: session.url)
+            }
             for message in messages { continuation.yield(message) }
             return RealtimeAcknowledgement(
                 success: true,
