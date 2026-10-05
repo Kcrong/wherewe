@@ -8,7 +8,9 @@ extension NativeService {
         let database = try requireDatabase()
         let settings = try settingsStore.envelope().document
         let attachmentRoot = URL(fileURLWithPath: settings.paths.files, isDirectory: true)
-        let glossary = try await meetingGlossary(meetingID: id)
+        let globalTerms = try await glossary(language: canonicalLanguage(detail.language))
+        let meetingTerms = try await meetingGlossary(meetingID: id)
+        let glossary = globalTerms + meetingTerms
         let documentRows = try database.query(
             "SELECT * FROM documents WHERE meeting_id = ? ORDER BY created_at ASC, id ASC",
             [.integer(Int64(id))]
@@ -133,7 +135,7 @@ extension NativeService {
             lines += meeting.documents.map { "- `files/\($0.name)` (\($0.format))" }
         }
         if !glossary.isEmpty {
-            lines += ["", "## Glossary (this meeting only)", ""]
+            lines += ["", "## Glossary", ""]
             lines += glossary.map { entry in
                 let display = entry.displayAs.map { " → \($0)" } ?? ""
                 return "- **\(entry.phrase)**\(display) _[\(entry.language)]_"
