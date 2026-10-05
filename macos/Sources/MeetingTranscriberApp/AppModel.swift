@@ -279,6 +279,7 @@ final class AppModel: ObservableObject {
     }
 
     func connect() async {
+        guard phase != .ready else { return }
         phase = .connecting
         do {
             let health = try await api.health()
