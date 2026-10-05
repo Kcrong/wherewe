@@ -71,7 +71,7 @@ extension NativeService {
     private func rejectUnsafeFilesDirectoryChange(_ prepared: NativeSettingsStore.PreparedUpdate) throws {
         guard settingsStore.isConfigured else { return }
         let currentFiles = try settingsStore.envelope().document.paths.files
-        guard prepared.request.paths.files != currentFiles else { return }
+        guard prepared.document.paths.files != currentFiles else { return }
         guard try requireDatabase().first("SELECT id FROM documents LIMIT 1") == nil else {
             throw NativeServiceError.server(
                 status: 409,
