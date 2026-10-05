@@ -154,18 +154,28 @@ extension NativeService {
             "# \(meeting.title) — Transcript", "",
             "_\(meeting.segments.count + raw.count) entries (\(meeting.segments.count) edited + \(raw.count) raw) • \(meeting.language)_", "",
         ]
-        for segment in meeting.segments {
-            if let speaker = speakerLabel(segment.channelID, speaker: segment.speaker) { lines.append("**\(speaker)**") }
-            lines.append(segment.text)
-            if let translation = segment.translation { lines += ["", "> \(translation)"] }
-            lines.append("")
-        }
-        for row in raw {
-            let timestamp = row.createdAt.map { "_\($0)_ " } ?? ""
-            let speaker = speakerLabel(row.channelID, speaker: row.speaker).map { "**\($0)** " } ?? ""
-            lines.append("\(timestamp)\(speaker)_(raw)_")
-            lines.append(row.text)
-            if let translation = row.translation { lines += ["", "> \(translation)"] }
+        let timeline = TranscriptTimeline.merged(
+            transcripts: raw,
+            segments: meeting.segments,
+            transcriptID: { $0.id },
+            segmentOrderIndex: { $0.orderIndex },
+            segmentID: { $0.id }
+        )
+        for entry in timeline {
+            switch entry {
+            case let .segment(segment):
+                if let speaker = speakerLabel(segment.channelID, speaker: segment.speaker) {
+                    lines.append("**\(speaker)**")
+                }
+                lines.append(segment.text)
+                if let translation = segment.translation { lines += ["", "> \(translation)"] }
+            case let .transcript(row):
+                let timestamp = row.createdAt.map { "_\($0)_ " } ?? ""
+                let speaker = speakerLabel(row.channelID, speaker: row.speaker).map { "**\($0)** " } ?? ""
+                lines.append("\(timestamp)\(speaker)_(raw)_")
+                lines.append(row.text)
+                if let translation = row.translation { lines += ["", "> \(translation)"] }
+            }
             lines.append("")
         }
         return lines.joined(separator: "\n") + "\n"
