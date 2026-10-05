@@ -274,6 +274,33 @@ test("release credentials select signed or ad-hoc draft mode after the non-secre
   assert.match(release, /security delete-keychain/);
 });
 
+test("signed releases validate a copied app through Gatekeeper and LaunchServices", () => {
+  const notarizeStep = namedStep(release, "Notarise and staple DMG");
+  const installedStep = namedStep(release, "Validate installed app");
+  assert.match(installedStep, /if: steps\.release-mode\.outputs\.signed == 'true'/);
+  assert.ok(release.indexOf("name: Notarise and staple DMG") < release.indexOf("name: Validate installed app"));
+  assert.ok(release.indexOf("name: Validate installed app") < release.indexOf("name: Create SHA-256 checksum"));
+
+  assert.match(notarizeStep, /stapler validate/);
+  assert.match(installedStep, /RUNNER_TEMP\/notarized-dmg-mount/);
+  assert.match(installedStep, /RUNNER_TEMP\/notarized-app-install/);
+  assert.match(installedStep, /hdiutil attach "\$WHEREWE_DMG_PATH"/);
+  assert.match(installedStep, /ditto "\$MOUNT_POINT\/Wherewe\.app" "\$INSTALLED_APP"/);
+  assert.match(installedStep, /hdiutil detach "\$MOUNT_POINT"/);
+  assert.match(installedStep, /spctl --assess --type execute --verbose=4 "\$INSTALLED_APP"/);
+  assert.match(installedStep, /WHEREWE_NATIVE_LAUNCH_MODE=launchservices/);
+  assert.match(installedStep, /bash scripts\/test-macos-app-bundle\.sh/);
+  assert.match(installedStep, /trap teardown EXIT INT TERM/);
+  assert.ok(installedStep.indexOf("for path in") < installedStep.indexOf("trap teardown EXIT INT TERM"));
+  assert.match(installedStep, /rm -rf "\$MOUNT_POINT" "\$INSTALL_ROOT" "\$SMOKE_ROOT"/);
+
+  assert.match(appSmoke, /LAUNCH_MODE="\$\{WHEREWE_NATIVE_LAUNCH_MODE:-direct\}"/);
+  assert.match(appSmoke, /\/usr\/bin\/open -n -W "\$APP_PATH"/);
+  assert.match(appSmoke, /running_app_pids/);
+  assert.match(appSmoke, /-f "\$SUPPORT\/data\/meetings\.db"/);
+  assert.match(appSmoke, /kill -TERM "\$APP_PID"/);
+});
+
 test("all third-party workflow actions are pinned to full commits", () => {
   const references = [...actionReferences(ci), ...actionReferences(release)];
   assert.ok(references.length >= 3);

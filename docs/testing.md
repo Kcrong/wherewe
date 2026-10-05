@@ -8,7 +8,7 @@ proves. Source inventories are checked by `testing-strategy.test.js`.
 - Swift test sources: 26 files, 23 suites, 81 declared tests.
 - Deterministic Swift baseline: 76 tests.
 - Opt-in Swift runtime and hardware checks: 5 tests across 3 environment keys.
-- Node source contracts: 13 files, 59 declared tests.
+- Node source contracts: 13 files, 60 declared tests.
 - `MeetingTranscriberCoreChecks` is a separate executable smoke contract.
 - App and DMG checks are shell integration tests, not GUI automation.
 
