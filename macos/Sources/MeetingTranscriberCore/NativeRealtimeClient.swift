@@ -259,7 +259,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
             return (session.byteCount, Int(try session.handle.offset()))
         }
         let matches = byteCounts.map { $0.tracked == $0.stored } ?? false
-        let code = if matches {
+        let code: String? = if matches {
             nil
         } else if byteCounts == nil {
             "AUDIO_BARRIER_NOT_OWNED"
