@@ -241,7 +241,9 @@ public actor RecordingCoordinator {
             throw error
         }
         var finalized = socketStop.success || socketStop.code == "RECORDING_CLAIM_STALE"
-        if !finalized, socketStop.code == "AUDIO_SESSION_UNAVAILABLE" {
+        if !finalized,
+           socketStop.code == "AUDIO_SESSION_UNAVAILABLE",
+           expectedAudioByteCount == 0 {
             usedServiceFallback = true
             finalized = await finalizeClaimViaService(claim)
         }
@@ -271,7 +273,8 @@ public actor RecordingCoordinator {
                 throw error
             }
         }
-        guard await finalizeClaim(claim) else {
+        let allowsServiceFallback = !tracksAudioDelivery || expectedAudioByteCount == 0
+        guard await finalizeClaim(claim, allowsServiceFallback: allowsServiceFallback) else {
             state = .recoveryRequired(claim)
             throw RecordingCoordinatorError.finalizationUnconfirmed
         }
@@ -402,7 +405,10 @@ public actor RecordingCoordinator {
         audioDeliveryConfirmed = true
     }
 
-    private func finalizeClaim(_ claim: RecordingClaim) async -> Bool {
+    private func finalizeClaim(
+        _ claim: RecordingClaim,
+        allowsServiceFallback: Bool = true
+    ) async -> Bool {
         do {
             let acknowledgement = try await realtime.stopTranscription(
                 meetingID: claim.meetingID,
@@ -411,7 +417,8 @@ public actor RecordingCoordinator {
             if acknowledgement.success || acknowledgement.code == "RECORDING_CLAIM_STALE" {
                 return true
             }
-            guard acknowledgement.code == "AUDIO_SESSION_UNAVAILABLE" else { return false }
+            guard allowsServiceFallback,
+                  acknowledgement.code == "AUDIO_SESSION_UNAVAILABLE" else { return false }
             return await finalizeClaimViaService(claim)
         } catch {
             return false

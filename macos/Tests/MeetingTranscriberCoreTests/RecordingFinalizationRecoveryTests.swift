@@ -154,6 +154,43 @@ struct RecordingFinalizationRecoveryTests {
         await service.shutdown()
     }
 
+    @Test("tracked PCM cannot bypass its spool through service finalization")
+    func trackedPCMDoesNotUseServiceFallback() async throws {
+        let fixture = try FinalizationRecoveryFixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Keep tracked PCM owned"))
+        let baseRealtime = NativeRealtimeClient(service: service)
+        let realtime = PCMDeliveryFaultRealtime(
+            base: baseRealtime,
+            fault: .none,
+            disconnectAfterBarrier: true
+        )
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime)
+        let claim = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        try await coordinator.sendPCM([Int16](repeating: 1, count: 1_600))
+
+        await #expect(throws: RecordingCoordinatorError.finalizationUnconfirmed) {
+            _ = try await coordinator.stop()
+        }
+        #expect(await coordinator.state == .recoveryRequired(claim))
+        #expect(realtime.barrierByteCounts() == [3_200])
+        #expect(realtime.stopAttempts() == 1)
+        let unfinished = try await service.meeting(id: meeting.id)
+        #expect(unfinished.endedAt == nil)
+        #expect(unfinished.transcripts.isEmpty)
+
+        await coordinator.close()
+        await service.shutdown()
+    }
+
     private func verifyOwnedAudioRetry() async throws {
         let fixture = try FinalizationRecoveryFixture()
         defer { fixture.remove() }
@@ -435,6 +472,7 @@ private enum FinalizationTestFailure: Error {
 
 private final class PCMDeliveryFaultRealtime: RealtimeServing, @unchecked Sendable {
     enum Fault {
+        case none
         case failOnce(attempt: Int)
         case truncate(bytes: Int)
     }
@@ -444,15 +482,21 @@ private final class PCMDeliveryFaultRealtime: RealtimeServing, @unchecked Sendab
 
     private let base: NativeRealtimeClient
     private let fault: Fault
+    private let disconnectAfterBarrier: Bool
     private let lock = NSLock()
     private var sends = 0
     private var deliveredBytes = 0
     private var barriers: [Int] = []
     private var stops = 0
 
-    init(base: NativeRealtimeClient, fault: Fault) {
+    init(
+        base: NativeRealtimeClient,
+        fault: Fault,
+        disconnectAfterBarrier: Bool = false
+    ) {
         self.base = base
         self.fault = fault
+        self.disconnectAfterBarrier = disconnectAfterBarrier
     }
 
     func connect() async throws { try await base.connect() }
@@ -486,6 +530,7 @@ private final class PCMDeliveryFaultRealtime: RealtimeServing, @unchecked Sendab
         if let audioByteCount = acknowledgement.audioByteCount {
             withLock { barriers.append(audioByteCount) }
         }
+        if disconnectAfterBarrier { base.disconnect() }
         return acknowledgement
     }
 
