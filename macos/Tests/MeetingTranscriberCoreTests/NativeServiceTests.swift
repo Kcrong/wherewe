@@ -529,6 +529,60 @@ struct NativeServiceTests {
         }
     }
 
+    @Test("files directory changes are rejected while attachments exist")
+    func filesDirectoryChangeWithAttachments() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Attachment directory guard"))
+        let payload = Data("attachment remains available".utf8)
+        let upload = try await service.uploadDocument(
+            meetingID: meeting.id,
+            name: "evidence.txt",
+            data: payload
+        )
+        let current = try await service.settings()
+        let replacementFiles = fixture.root.appendingPathComponent("replacement-files", isDirectory: true)
+        var replacement = current.document.updateRequest
+        replacement.paths.files = replacementFiles.path
+        let expectedError = NativeServiceError.server(
+            status: 409,
+            code: "SETTINGS_FILES_DIRECTORY_IN_USE",
+            message: "The files directory cannot change while attachments exist. Keep the current directory or delete the attachments first."
+        )
+
+        do {
+            _ = try await service.updateSettings(replacement, etag: current.etag)
+            Issue.record("changing the files directory must be rejected while attachments exist")
+        } catch let error as NativeServiceError {
+            #expect(error == expectedError)
+        }
+        do {
+            _ = try await service.importSettings(
+                JSONEncoder().encode(replacement),
+                etag: current.etag
+            )
+            Issue.record("importing a different files directory must be rejected while attachments exist")
+        } catch let error as NativeServiceError {
+            #expect(error == expectedError)
+        }
+
+        #expect(try await service.settings().document.paths.files == fixture.filesURL.path)
+        #expect(!FileManager.default.fileExists(atPath: replacementFiles.path))
+        #expect(try await service.documentContent(id: upload.id).data == payload)
+        let exported = try await service.exportMeeting(id: meeting.id)
+        let exportedAttachment = URL(fileURLWithPath: exported.path, isDirectory: true)
+            .appendingPathComponent("background/files/evidence.txt")
+        #expect(try Data(contentsOf: exportedAttachment) == payload)
+        #expect(try await service.deleteDocument(id: upload.id).success)
+
+        let afterDeletion = try await service.settings()
+        let changed = try await service.updateSettings(replacement, etag: afterDeletion.etag)
+        #expect(changed.document.paths.files == replacementFiles.path)
+        #expect(FileManager.default.fileExists(atPath: replacementFiles.path))
+    }
+
     @Test("attachments glossary and export stay local and secure")
     func workspacePersistenceAndExport() async throws {
         let fixture = try Fixture()

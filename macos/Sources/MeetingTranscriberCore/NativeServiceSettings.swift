@@ -56,14 +56,29 @@ extension NativeService {
     }
 
     private func activateSettings(_ prepared: NativeSettingsStore.PreparedUpdate) throws -> SettingsEnvelope {
+        try rejectUnsafeFilesDirectoryChange(prepared)
         let candidate = try NativeDatabase(
             url: URL(fileURLWithPath: prepared.document.paths.database),
             fileManager: fileManager
         )
+        try settingsStore.prepareStorage(for: prepared)
         let envelope = try settingsStore.commit(prepared)
         databaseStorage = candidate
         startupError = nil
         return envelope
+    }
+
+    private func rejectUnsafeFilesDirectoryChange(_ prepared: NativeSettingsStore.PreparedUpdate) throws {
+        guard settingsStore.isConfigured else { return }
+        let currentFiles = try settingsStore.envelope().document.paths.files
+        guard prepared.document.paths.files != currentFiles else { return }
+        guard try requireDatabase().first("SELECT id FROM documents LIMIT 1") == nil else {
+            throw NativeServiceError.server(
+                status: 409,
+                code: "SETTINGS_FILES_DIRECTORY_IN_USE",
+                message: "The files directory cannot change while attachments exist. Keep the current directory or delete the attachments first."
+            )
+        }
     }
 
     public func transcriptionCatalogue() async throws -> TranscriptionCatalogueResponse {

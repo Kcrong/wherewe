@@ -53,7 +53,15 @@ final class NativeSettingsStore {
         request.paths = try NativeStoragePathPolicy.canonicalize(request.paths)
         try validate(request)
         try validateRevision(etag)
+        return PreparedUpdate(
+            request: request,
+            etag: etag,
+            document: document(for: request, configured: true)
+        )
+    }
 
+    func prepareStorage(for prepared: PreparedUpdate) throws {
+        let request = prepared.request
         _ = try NativeStoragePathPolicy.secureDirectory(
             configuration.configURL.deletingLastPathComponent(),
             fileManager: fileManager
@@ -66,16 +74,12 @@ final class NativeSettingsStore {
             URL(fileURLWithPath: request.paths.database),
             fileManager: fileManager
         )
-
-        return PreparedUpdate(
-            request: request,
-            etag: etag,
-            document: document(for: request, configured: true)
-        )
     }
 
     func update(_ submitted: SettingsUpdateRequest, etag: String?) throws -> SettingsEnvelope {
-        try commit(prepareUpdate(submitted, etag: etag))
+        let prepared = try prepareUpdate(submitted, etag: etag)
+        try prepareStorage(for: prepared)
+        return try commit(prepared)
     }
 
     func commit(_ prepared: PreparedUpdate) throws -> SettingsEnvelope {
