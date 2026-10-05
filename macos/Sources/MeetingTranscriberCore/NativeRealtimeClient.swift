@@ -48,7 +48,8 @@ public final class NativeRealtimeHub: @unchecked Sendable {
 }
 
 public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
-    private static let spoolWorkspace: Result<NativeSpoolWorkspace, Error> = Result {
+    private static let defaultMaximumSpoolBytes = 64 * 1_024 * 1_024
+    private static let sharedSpoolWorkspace: Result<NativeSpoolWorkspace, Error> = Result {
         try NativeSpoolWorkspace()
     }
 
@@ -58,13 +59,14 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
     private struct AudioSession {
         let id = UUID()
         let request: StartTranscriptionRequest
-        let url: URL
-        let handle: FileHandle
+        var url: URL
+        var handle: FileHandle
         var resultIDs: [String]
         var byteCount = 0
         var processedByteCount = 0
         var lastPreviewByteCount = 0
         var previewInFlight = false
+        var spoolFailure: NativeServiceError?
     }
 
     private struct PreviewWork {
@@ -81,15 +83,47 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
     private let service: NativeService
     private let hub: NativeRealtimeHub
     private let continuation: AsyncStream<RealtimeMessage>.Continuation
+    private let spoolWorkspace: Result<NativeSpoolWorkspace, Error>
+    private let maximumSpoolBytes: Int
     private let lock = NSLock()
     private var connected = false
     private var audioSession: AudioSession?
     private var previewTasks: [UUID: Task<Void, Never>] = [:]
     private var preparationTasks: [UUID: Task<Void, Never>] = [:]
 
-    public init(service: NativeService, hub: NativeRealtimeHub? = nil) {
+    public convenience init(service: NativeService, hub: NativeRealtimeHub? = nil) {
+        self.init(
+            service: service,
+            hub: hub,
+            spoolWorkspace: Self.sharedSpoolWorkspace,
+            maximumSpoolBytes: Self.defaultMaximumSpoolBytes
+        )
+    }
+
+    convenience init(
+        service: NativeService,
+        hub: NativeRealtimeHub? = nil,
+        spoolWorkspace: NativeSpoolWorkspace,
+        maximumSpoolBytes: Int
+    ) {
+        self.init(
+            service: service,
+            hub: hub,
+            spoolWorkspace: .success(spoolWorkspace),
+            maximumSpoolBytes: maximumSpoolBytes
+        )
+    }
+
+    private init(
+        service: NativeService,
+        hub: NativeRealtimeHub?,
+        spoolWorkspace: Result<NativeSpoolWorkspace, Error>,
+        maximumSpoolBytes: Int
+    ) {
         self.service = service
         self.hub = hub ?? service.eventHub
+        self.spoolWorkspace = spoolWorkspace
+        self.maximumSpoolBytes = max(1, maximumSpoolBytes)
         let pair = AsyncStream.makeStream(
             of: RealtimeMessage.self,
             bufferingPolicy: .bufferingNewest(1_024)
@@ -97,7 +131,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         self.messages = pair.stream
         self.continuation = pair.continuation
         self.hub.register(identifier, continuation: pair.continuation)
-        _ = Self.spoolWorkspace
+        _ = spoolWorkspace
     }
 
     deinit {
@@ -205,6 +239,18 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         guard !data.isEmpty else { return }
         let work: PreviewWork? = try withLock {
             guard connected, var session = audioSession else { throw RealtimeClientError.disconnected }
+            if let spoolFailure = session.spoolFailure { throw spoolFailure }
+            guard session.byteCount <= maximumSpoolBytes,
+                  data.count <= maximumSpoolBytes - session.byteCount else {
+                let failure = NativeServiceError.server(
+                    status: 507,
+                    code: "AUDIO_SPOOL_LIMIT",
+                    message: "Recording audio storage reached its safety limit. Stop and finish the recording before continuing."
+                )
+                session.spoolFailure = failure
+                audioSession = session
+                throw failure
+            }
             try session.handle.write(contentsOf: data)
             session.byteCount += data.count
             let bytesPerSecond = max(1, Int(session.request.sampleRate) * session.request.channelCount * 2)
@@ -353,7 +399,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
     }
 
     private func makeAudioSession(_ request: StartTranscriptionRequest) throws -> AudioSession {
-        let spool = try Self.spoolWorkspace.get().makeSpoolFile()
+        let spool = try spoolWorkspace.get().makeSpoolFile()
         return AudioSession(
             request: request,
             url: spool.url,
@@ -376,23 +422,10 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
     }
 
     private func runPreview(_ work: PreviewWork) async {
-        var committed = false
-        var committedEnd = work.endByte
-        defer {
-            withLock {
-                guard var current = audioSession,
-                      current.id == work.sessionID,
-                      current.request.generation == work.request.generation else { return }
-                if work.commit, committed, current.processedByteCount == work.startByte {
-                    current.processedByteCount = committedEnd
-                    current.resultIDs = (0..<work.request.channelCount).map { _ in UUID().uuidString }
-                }
-                current.previewInFlight = false
-                audioSession = current
-            }
-        }
+        defer { clearPreviewInFlight(work) }
         guard !Task.isCancelled, isCurrentSession(work.sessionID) else { return }
         guard var data = try? readSpool(work.url, from: work.startByte, to: work.endByte) else { return }
+        var committedEnd = work.endByte
         if work.commit {
             let length = PCMCommitBoundary.commitLength(
                 of: data,
@@ -411,7 +444,23 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
                     resultIDs: work.resultIDs,
                     clientID: identifier.uuidString
                 )
-                committed = true
+                guard !Task.isCancelled, isCurrentSession(work.sessionID) else { return }
+                do {
+                    guard try rotateCommittedAudio(work, committedEnd: committedEnd) else { return }
+                } catch {
+                    let failure = NativeServiceError.server(
+                        status: 507,
+                        code: "NATIVE_AUDIO_SPOOL_FAILED",
+                        message: "Committed audio could not be released from temporary storage. Stop and finish the recording."
+                    )
+                    recordCommittedSpoolFailure(work, committedEnd: committedEnd, failure: failure)
+                    continuation.yield(RealtimeMessage(name: .transcribeError, payload: Self.payload([
+                        "code": "NATIVE_AUDIO_SPOOL_FAILED",
+                        "message": failure.localizedDescription,
+                        "generation": work.request.generation,
+                    ])))
+                    return
+                }
             } else {
                 messages = try await service.previewRealtimeTranscription(
                     work.request,
@@ -419,8 +468,8 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
                     resultIDs: work.resultIDs,
                     clientID: identifier.uuidString
                 )
+                guard !Task.isCancelled, isCurrentSession(work.sessionID) else { return }
             }
-            guard !Task.isCancelled, isCurrentSession(work.sessionID) else { return }
             for message in messages { continuation.yield(message) }
         } catch is CancellationError {
             return
@@ -431,6 +480,64 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
                 "message": error.localizedDescription,
                 "generation": work.request.generation,
             ])))
+        }
+    }
+
+    private func rotateCommittedAudio(_ work: PreviewWork, committedEnd: Int) throws -> Bool {
+        try withLock {
+            guard var current = audioSession,
+                  current.id == work.sessionID,
+                  current.request.generation == work.request.generation,
+                  current.processedByteCount == work.startByte else { return false }
+            try current.handle.synchronize()
+            let pending = try readSpool(current.url, from: committedEnd, to: current.byteCount)
+            let replacement = try spoolWorkspace.get().makeSpoolFile()
+            do {
+                try replacement.handle.write(contentsOf: pending)
+                try replacement.handle.synchronize()
+                try FileManager.default.removeItem(at: current.url)
+            } catch {
+                try? replacement.handle.close()
+                try? FileManager.default.removeItem(at: replacement.url)
+                throw error
+            }
+            try? current.handle.close()
+            current.url = replacement.url
+            current.handle = replacement.handle
+            current.byteCount = pending.count
+            current.processedByteCount = 0
+            current.lastPreviewByteCount = max(0, current.lastPreviewByteCount - committedEnd)
+            current.resultIDs = (0..<work.request.channelCount).map { _ in UUID().uuidString }
+            audioSession = current
+            return true
+        }
+    }
+
+    private func recordCommittedSpoolFailure(
+        _ work: PreviewWork,
+        committedEnd: Int,
+        failure: NativeServiceError
+    ) {
+        withLock {
+            guard var current = audioSession,
+                  current.id == work.sessionID,
+                  current.request.generation == work.request.generation else { return }
+            if current.processedByteCount == work.startByte {
+                current.processedByteCount = committedEnd
+                current.resultIDs = (0..<work.request.channelCount).map { _ in UUID().uuidString }
+            }
+            current.spoolFailure = failure
+            audioSession = current
+        }
+    }
+
+    private func clearPreviewInFlight(_ work: PreviewWork) {
+        withLock {
+            guard var current = audioSession,
+                  current.id == work.sessionID,
+                  current.request.generation == work.request.generation else { return }
+            current.previewInFlight = false
+            audioSession = current
         }
     }
 
