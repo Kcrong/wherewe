@@ -23,6 +23,14 @@ const preferenceTests = fs.readFileSync(
   path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/NativePreferencesTests.swift"),
   "utf8"
 );
+const modelTests = fs.readFileSync(
+  path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/ModelsTests.swift"),
+  "utf8"
+);
+const coreModels = fs.readFileSync(
+  path.join(ROOT, "macos/Sources/MeetingTranscriberCore/Models.swift"),
+  "utf8"
+);
 
 function swiftView(name, nextName) {
   const start = view.indexOf(`private struct ${name}: View {`);
@@ -116,13 +124,16 @@ test("database changes clear and reload application state before mutations resum
   assert.ok(databaseUpdate < reloadCall);
 
   assert.match(clearState, /meetingLoadGeneration \+= 1/);
-  assert.match(clearState, /meetings = \[\][\s\S]*selectedMeetingID = nil[\s\S]*meetingDetail = nil/);
+  assert.match(
+    clearState,
+    /meetings = \[\][\s\S]*meetingSelection = MeetingSelectionState\(\)[\s\S]*meetingDetail = nil/
+  );
   assert.match(clearState, /meetingTitleDraft = ""[\s\S]*meetingContextDraft = ""/);
   assert.match(clearState, /transcriptStore = TranscriptStore\(\)[\s\S]*transcriptItems = \[\]/);
   assert.match(clearState, /documents = \[\][\s\S]*globalGlossary = \[\][\s\S]*meetingGlossary = \[\]/);
   assert.match(
     reloadState,
-    /meetings = try await api\.meetings\(\)[\s\S]*selectedMeetingID = meetings\.first\?\.id[\s\S]*await loadSelectedMeeting\(\)/
+    /meetings = try await api\.meetings\(\)[\s\S]*updateMeetingSelection\(meetings\.first\?\.id\)[\s\S]*await loadSelectedMeeting\(\)/
   );
   assert.match(model, /var canStartRecording:[\s\S]{0,220}!databaseTransitionInProgress/);
   assert.match(model, /func selectMeeting[\s\S]{0,140}!databaseTransitionInProgress/);
@@ -188,6 +199,110 @@ test("transcript search copy editing and translation retry remain", () => {
   assert.match(model, /api\.editTranscript\(/);
   assert.match(model, /api\.editSegment\(/);
   assert.match(model, /api\.retryTranslation\(/);
+});
+
+test("meeting selection clears stale state and fences meeting mutations", () => {
+  const rootView = swiftView("RootView", "SettingsView");
+  const loadStart = model.indexOf("func loadSelectedMeeting() async {");
+  const loadEnd = model.indexOf("\n    func startRecordingWithoutMeeting()", loadStart);
+  const loadSelectedMeeting = model.slice(loadStart, loadEnd);
+  const clearStart = model.indexOf("private func clearMeetingDependentState() {");
+  const clearEnd = model.indexOf("\n    func refreshMeetings()", clearStart);
+  const clearMeetingDependentState = model.slice(clearStart, clearEnd);
+
+  assert.notEqual(loadStart, -1, "missing selected meeting load");
+  assert.ok(loadEnd > loadStart, "missing selected meeting load boundary");
+  assert.notEqual(clearStart, -1, "missing meeting state invalidation");
+  assert.ok(clearEnd > clearStart, "missing meeting state invalidation boundary");
+  assert.match(model, /@Published private var meetingSelection = MeetingSelectionState\(\)/);
+  assert.match(
+    coreModels,
+    /package struct MeetingSelectionState:[\s\S]{0,180}package init\(\) \{[\s\S]{0,100}selectedID = nil[\s\S]{0,100}loadedID = nil/
+  );
+  assert.match(model, /var selectedMeetingID: Int\? \{ meetingSelection\.selectedID \}/);
+  assert.match(model, /var selectedMeetingIsLoaded: Bool \{ loadedSelectedMeetingID != nil \}/);
+  assert.match(
+    model,
+    /private func updateMeetingSelection\(_ id: Int\?\)[\s\S]{0,240}nextSelection\.select\(id\)[\s\S]{0,160}meetingLoadGeneration \+= 1[\s\S]{0,100}clearMeetingDependentState\(\)/
+  );
+  for (const state of [
+    "meetingDetail = nil",
+    'meetingTitleDraft = ""',
+    'meetingContextDraft = ""',
+    "transcriptItems = []",
+    "documents = []",
+    "documentPreview = nil",
+    "meetingGlossary = []",
+    "exportResult = nil",
+  ]) {
+    assert.ok(clearMeetingDependentState.includes(state), `selection change must clear ${state}`);
+  }
+
+  const loadOrder = [
+    "beginLoading()",
+    "clearMeetingDependentState()",
+    "api.meeting(id: meetingID)",
+    "api.activateMeeting(id: meetingID)",
+    "await loadDocuments()",
+    "await loadGlossary()",
+    "finishLoading(meetingID)",
+    "meetingSelection = loadedSelection",
+  ];
+  let prior = -1;
+  for (const expression of loadOrder) {
+    const index = loadSelectedMeeting.indexOf(expression);
+    assert.ok(index > prior, `meeting load ordering is missing or invalid: ${expression}`);
+    prior = index;
+  }
+  assert.match(
+    loadSelectedMeeting,
+    /guard generation == meetingLoadGeneration, selectedMeetingID == meetingID else \{ return \}[\s\S]{0,160}finishLoading\(meetingID\)/
+  );
+
+  for (const method of [
+    "saveMeetingDetails",
+    "deleteSelectedMeeting",
+    "changeTranslationTarget",
+    "saveSegmentEdit",
+    "retryTranslation",
+    "uploadDocuments",
+    "exportSelectedMeeting",
+    "resyncTranscriptState",
+  ]) {
+    const start = model.indexOf(`func ${method}(`);
+    assert.notEqual(start, -1, `missing mutation method: ${method}`);
+    const nextPublic = model.indexOf("\n    func ", start + 1);
+    const nextPrivate = model.indexOf("\n    private func ", start + 1);
+    const boundaries = [nextPublic, nextPrivate].filter((index) => index > start);
+    const end = boundaries.length > 0 ? Math.min(...boundaries) : model.length;
+    assert.match(
+      model.slice(start, end),
+      /loadedSelectedMeetingID/,
+      `${method} must require the loaded selection`
+    );
+  }
+
+  const uploadStart = model.indexOf("func uploadDocuments(");
+  const uploadEnd = model.indexOf("\n    func previewDocument(", uploadStart);
+  const uploadDocuments = model.slice(uploadStart, uploadEnd);
+  assert.ok(uploadStart >= 0 && uploadEnd > uploadStart, "missing uploadDocuments boundary");
+
+  assert.match(model, /func deleteSelectedMeeting[\s\S]{0,900}api\.deleteMeeting[\s\S]{0,140}if selectedMeetingID == meetingID[\s\S]{0,100}updateMeetingSelection\(nil\)[\s\S]{0,180}if selectedMeetingID == nil/);
+  assert.match(model, /func beginEditingSegment[\s\S]{0,140}loadedSelectedMeetingID == segment\.meetingID/);
+  assert.match(model, /func previewDocument[\s\S]{0,220}let meetingID = loadedSelectedMeetingID[\s\S]{0,140}documents\.contains/);
+  assert.match(uploadDocuments, /guard loadedSelectedMeetingID == meetingID else \{ return \}[\s\S]*api\.uploadDocument/);
+  assert.match(model, /func exportSelectedMeeting[\s\S]{0,260}api\.exportMeeting[\s\S]{0,140}guard loadedSelectedMeetingID == meetingID/);
+  assert.match(model, /func deleteDocument[\s\S]{0,220}loadedSelectedMeetingID != nil[\s\S]{0,140}documents\.contains/);
+  assert.match(model, /func deleteGlossaryEntry[\s\S]{0,260}loadedSelectedMeetingID == meetingID[\s\S]{0,120}meetingGlossary\.contains/);
+  assert.match(model, /event\.meetingID == self\.loadedSelectedMeetingID/);
+  assert.match(rootView, /if model\.selectedMeetingIsLoaded \{\s*MeetingDetailView/);
+  assert.match(rootView, /ProgressView\("Loading meeting…"\)/);
+  assert.match(rootView, /title: "Meeting Unavailable"[\s\S]{0,300}await model\.loadSelectedMeeting\(\)/);
+  assert.match(modelTests, /meeting selection admits mutations only after the matching load/);
+  assert.doesNotMatch(
+    modelTests,
+    /#expect\([^\n]*selection\.(?:select|beginLoading|finishLoading)\(/
+  );
 });
 
 test("live transcript follows the bottom until the user scrolls away", () => {

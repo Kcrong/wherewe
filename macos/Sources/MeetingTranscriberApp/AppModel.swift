@@ -43,7 +43,7 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var meetings: [MeetingSummary] = []
     @Published var meetingSearchText = ""
-    @Published var selectedMeetingID: Int?
+    @Published private var meetingSelection = MeetingSelectionState()
     @Published private(set) var meetingDetail: MeetingDetail?
     @Published var showingNewMeeting = false
     @Published var showingDeleteMeetingConfirmation = false
@@ -213,6 +213,12 @@ final class AppModel: ObservableObject {
         startRealtimeEventPump()
     }
 
+    var selectedMeetingID: Int? { meetingSelection.selectedID }
+
+    var selectedMeetingIsLoaded: Bool { loadedSelectedMeetingID != nil }
+
+    private var loadedSelectedMeetingID: Int? { meetingSelection.mutationID }
+
     var selectedMeeting: MeetingSummary? {
         guard let selectedMeetingID else { return nil }
         return meetings.first { $0.id == selectedMeetingID }
@@ -267,7 +273,7 @@ final class AppModel: ObservableObject {
             && recordingPhase == .idle
             && !databaseTransitionInProgress
             && !terminationRequested
-            && selectedMeetingID != nil
+            && loadedSelectedMeetingID != nil
             && (selectedMicrophone != nil || selectedSystemInput != nil)
             && selectedTranscriptionReady
     }
@@ -316,10 +322,10 @@ final class AppModel: ObservableObject {
                 recordingPhase = .recoveryRequired
                 recordingMeetingID = meetingID
                 recordingError = "A previous recording was not finalised. Retry finalisation before starting again."
-                selectedMeetingID = meetingID
+                updateMeetingSelection(meetingID)
             }
             if selectedMeetingID == nil {
-                selectedMeetingID = meetings.first?.id
+                updateMeetingSelection(meetings.first?.id)
             }
             initialSetupCompletionPending = false
             phase = .ready
@@ -331,7 +337,32 @@ final class AppModel: ObservableObject {
 
     func selectMeeting(_ id: Int?) {
         guard recordingPhase == .idle, !databaseTransitionInProgress else { return }
-        selectedMeetingID = id
+        updateMeetingSelection(id)
+    }
+
+    private func updateMeetingSelection(_ id: Int?) {
+        var nextSelection = meetingSelection
+        guard nextSelection.select(id) else { return }
+        meetingSelection = nextSelection
+        meetingLoadGeneration += 1
+        clearMeetingDependentState()
+    }
+
+    private func clearMeetingDependentState() {
+        meetingDetail = nil
+        meetingTitleDraft = ""
+        meetingContextDraft = ""
+        transcriptItems = []
+        transcriptSearchText = ""
+        cancelEditingSegment()
+        documents = []
+        documentPreview = nil
+        globalGlossary = []
+        meetingGlossary = []
+        exportResult = nil
+        showingDeleteMeetingConfirmation = false
+        meetingMutationError = nil
+        workspaceError = nil
     }
 
     func refreshMeetings() async {
@@ -340,7 +371,7 @@ final class AppModel: ObservableObject {
             meetings = try await api.meetings()
             if let selectedMeetingID,
                !meetings.contains(where: { $0.id == selectedMeetingID }) {
-                self.selectedMeetingID = meetings.first?.id
+                updateMeetingSelection(meetings.first?.id)
             }
         } catch {
             workspaceError = error.localizedDescription
@@ -350,14 +381,11 @@ final class AppModel: ObservableObject {
     func loadSelectedMeeting() async {
         meetingLoadGeneration += 1
         let generation = meetingLoadGeneration
-        guard let meetingID = selectedMeetingID else {
-            meetingDetail = nil
-            transcriptItems = []
-            documents = []
-            globalGlossary = []
-            meetingGlossary = []
-            return
-        }
+        var loadingSelection = meetingSelection
+        let meetingID = loadingSelection.beginLoading()
+        meetingSelection = loadingSelection
+        clearMeetingDependentState()
+        guard let meetingID else { return }
         do {
             let detail = try await api.meeting(id: meetingID)
             guard generation == meetingLoadGeneration, selectedMeetingID == meetingID else { return }
@@ -367,10 +395,6 @@ final class AppModel: ObservableObject {
             meetingDetail = detail
             meetingTitleDraft = detail.title
             meetingContextDraft = detail.context
-            transcriptSearchText = ""
-            documentPreview = nil
-            exportResult = nil
-            workspaceError = nil
             restoringMeetingValues = true
             recognitionLanguage = detail.language
             translationTarget = detail.translationTarget
@@ -381,8 +405,12 @@ final class AppModel: ObservableObject {
             await refreshTranscriptItems()
             await loadDocuments()
             await loadGlossary()
+            guard generation == meetingLoadGeneration, selectedMeetingID == meetingID else { return }
+            var loadedSelection = meetingSelection
+            guard loadedSelection.finishLoading(meetingID) else { return }
+            meetingSelection = loadedSelection
         } catch {
-            guard generation == meetingLoadGeneration else { return }
+            guard generation == meetingLoadGeneration, selectedMeetingID == meetingID else { return }
             workspaceError = error.localizedDescription
         }
     }
@@ -401,7 +429,7 @@ final class AppModel: ObservableObject {
             ))
             meetingMutationInProgress = false
             await refreshMeetings()
-            selectedMeetingID = response.id
+            updateMeetingSelection(response.id)
             await loadSelectedMeeting()
             await startRecording()
         } catch {
@@ -427,14 +455,14 @@ final class AppModel: ObservableObject {
             newMeetingTitle = ""
             showingNewMeeting = false
             await refreshMeetings()
-            selectedMeetingID = response.id
+            updateMeetingSelection(response.id)
         } catch {
             meetingMutationError = error.localizedDescription
         }
     }
 
     func saveMeetingDetails() async {
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               recordingPhase == .idle,
               !meetingMutationInProgress,
               !databaseTransitionInProgress else { return }
@@ -459,7 +487,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSelectedMeeting() async {
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               !meetingMutationInProgress,
               !databaseTransitionInProgress else { return }
         if recordingPhase == .recording { await stopRecording() }
@@ -467,23 +495,26 @@ final class AppModel: ObservableObject {
             meetingMutationError = "Confirm recording finalisation before deleting this meeting."
             return
         }
+        guard loadedSelectedMeetingID == meetingID else { return }
         meetingMutationInProgress = true
         meetingMutationError = nil
         defer { meetingMutationInProgress = false }
         do {
             _ = try await api.deleteMeeting(id: meetingID, socketID: realtime.clientID)
-            selectedMeetingID = nil
-            meetingDetail = nil
-            transcriptItems = []
+            if selectedMeetingID == meetingID {
+                updateMeetingSelection(nil)
+            }
             await refreshMeetings()
-            selectedMeetingID = meetings.first?.id
+            if selectedMeetingID == nil {
+                updateMeetingSelection(meetings.first?.id)
+            }
         } catch {
             meetingMutationError = error.localizedDescription
         }
     }
 
     func changeTranslationTarget(_ target: String) async {
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               recordingPhase == .idle,
               !databaseTransitionInProgress else { return }
         do {
@@ -496,13 +527,14 @@ final class AppModel: ObservableObject {
     }
 
     func beginEditingSegment(_ segment: TranscriptSegment) {
+        guard loadedSelectedMeetingID == segment.meetingID else { return }
         editingTranscriptID = nil
         editingSegmentID = segment.id
         editingSegmentText = segment.text
     }
 
     func beginEditingTranscript(_ row: LiveTranscriptRow) {
-        guard let transcriptID = row.databaseID else { return }
+        guard loadedSelectedMeetingID != nil, let transcriptID = row.databaseID else { return }
         editingSegmentID = nil
         editingTranscriptID = transcriptID
         editingSegmentText = row.text
@@ -515,7 +547,7 @@ final class AppModel: ObservableObject {
     }
 
     func saveSegmentEdit() async {
-        guard let meetingID = selectedMeetingID, !databaseTransitionInProgress else { return }
+        guard let meetingID = loadedSelectedMeetingID, !databaseTransitionInProgress else { return }
         let text = editingSegmentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         do {
@@ -542,7 +574,7 @@ final class AppModel: ObservableObject {
     }
 
     func retryTranslation(entityType: TranslationEntityType, entityID: Int) async {
-        guard let meetingID = selectedMeetingID, !databaseTransitionInProgress else { return }
+        guard let meetingID = loadedSelectedMeetingID, !databaseTransitionInProgress else { return }
         do {
             _ = try await api.retryTranslation(
                 meetingID: meetingID,
@@ -569,7 +601,7 @@ final class AppModel: ObservableObject {
     }
 
     func uploadDocuments(_ urls: [URL]) async {
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               !fileOperationInProgress,
               !databaseTransitionInProgress else { return }
         fileOperationInProgress = true
@@ -586,12 +618,14 @@ final class AppModel: ObservableObject {
                 guard ["pdf", "md", "txt", "html", "csv"].contains(url.pathExtension.lowercased()) else {
                     throw WorkspaceValidationError.unsupportedFile(url.lastPathComponent)
                 }
+                guard loadedSelectedMeetingID == meetingID else { return }
                 _ = try await api.uploadDocument(
                     meetingID: meetingID,
                     name: url.lastPathComponent,
                     data: data
                 )
             }
+            guard loadedSelectedMeetingID == meetingID else { return }
             await loadDocuments()
         } catch {
             workspaceError = error.localizedDescription
@@ -599,12 +633,16 @@ final class AppModel: ObservableObject {
     }
 
     func previewDocument(_ document: UploadedDocument) async {
-        guard !fileOperationInProgress else { return }
+        guard let meetingID = loadedSelectedMeetingID,
+              documents.contains(where: { $0.id == document.id }),
+              !fileOperationInProgress else { return }
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
         do {
             let content = try await api.documentContent(id: document.id)
+            guard loadedSelectedMeetingID == meetingID,
+                  documents.contains(where: { $0.id == document.id }) else { return }
             documentPreview = DocumentPreview(
                 id: document.id,
                 name: document.name,
@@ -617,7 +655,10 @@ final class AppModel: ObservableObject {
     }
 
     func deleteDocument(_ document: UploadedDocument) async {
-        guard !fileOperationInProgress, !databaseTransitionInProgress else { return }
+        guard loadedSelectedMeetingID != nil,
+              documents.contains(where: { $0.id == document.id }),
+              !fileOperationInProgress,
+              !databaseTransitionInProgress else { return }
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
@@ -711,6 +752,10 @@ final class AppModel: ObservableObject {
     }
 
     func deleteGlossaryEntry(_ entry: GlossaryEntry) async {
+        if let meetingID = entry.meetingID {
+            guard loadedSelectedMeetingID == meetingID,
+                  meetingGlossary.contains(where: { $0.id == entry.id }) else { return }
+        }
         guard !glossaryOperationInProgress, !databaseTransitionInProgress else { return }
         glossaryOperationInProgress = true
         workspaceError = nil
@@ -724,10 +769,12 @@ final class AppModel: ObservableObject {
     }
 
     func exportSelectedMeeting() async {
-        guard let meetingID = selectedMeetingID else { return }
+        guard let meetingID = loadedSelectedMeetingID else { return }
         workspaceError = nil
         do {
-            exportResult = try await api.exportMeeting(id: meetingID)
+            let result = try await api.exportMeeting(id: meetingID)
+            guard loadedSelectedMeetingID == meetingID else { return }
+            exportResult = result
         } catch {
             workspaceError = error.localizedDescription
         }
@@ -939,7 +986,7 @@ final class AppModel: ObservableObject {
     private func clearDatabaseBackedState() {
         meetingLoadGeneration += 1
         meetings = []
-        selectedMeetingID = nil
+        meetingSelection = MeetingSelectionState()
         meetingDetail = nil
         showingNewMeeting = false
         showingDeleteMeetingConfirmation = false
@@ -978,7 +1025,7 @@ final class AppModel: ObservableObject {
     private func reloadDatabaseBackedState() async {
         do {
             meetings = try await api.meetings()
-            selectedMeetingID = meetings.first?.id
+            updateMeetingSelection(meetings.first?.id)
             await loadSelectedMeeting()
         } catch {
             workspaceError = error.localizedDescription
@@ -1010,7 +1057,7 @@ final class AppModel: ObservableObject {
     }
 
     private func performStartRecording() async {
-        guard canStartRecording, let meetingID = selectedMeetingID else { return }
+        guard canStartRecording, let meetingID = loadedSelectedMeetingID else { return }
         let microphone = selectedMicrophone
         let systemInput = selectedSystemInput
         let sameDevice = microphone?.uid == systemInput?.uid && microphone != nil
@@ -1311,6 +1358,7 @@ final class AppModel: ObservableObject {
                 switch message.name {
                 case .transcription:
                     guard let event = try? message.decode(TranscriptionEvent.self),
+                          event.meetingID == self.loadedSelectedMeetingID,
                           await self.transcriptStore.apply(event) != nil else { continue }
                     await self.refreshTranscriptItems()
                 case .segmentsUpdated, .translationUpdated, .translationTargetChanged:
@@ -1346,7 +1394,7 @@ final class AppModel: ObservableObject {
     }
 
     private func resyncTranscriptState() async {
-        guard let meetingID = selectedMeetingID else { return }
+        guard let meetingID = loadedSelectedMeetingID else { return }
         let generation = meetingLoadGeneration
         do {
             let state = try await api.transcriptState(meetingID: meetingID)

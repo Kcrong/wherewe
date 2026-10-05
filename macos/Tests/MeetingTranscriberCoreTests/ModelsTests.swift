@@ -51,6 +51,35 @@ struct ModelsTests {
         }
     }
 
+    @Test("meeting selection admits mutations only after the matching load")
+    func meetingSelectionRequiresMatchingLoad() {
+        var selection = MeetingSelectionState()
+
+        let selectedFirst = selection.select(11)
+        #expect(selectedFirst)
+        let loadingFirst = selection.beginLoading()
+        #expect(loadingFirst == 11)
+        #expect(selection.mutationID == nil)
+        let loadedFirst = selection.finishLoading(11)
+        #expect(loadedFirst)
+        #expect(selection.mutationID == 11)
+
+        let selectedSecond = selection.select(22)
+        #expect(selectedSecond)
+        #expect(selection.loadedID == nil)
+        #expect(selection.mutationID == nil)
+        let acceptedStaleLoad = selection.finishLoading(11)
+        #expect(!acceptedStaleLoad)
+        #expect(selection.mutationID == nil)
+        let loadedSecond = selection.finishLoading(22)
+        #expect(loadedSecond)
+        #expect(selection.mutationID == 22)
+
+        let reselectedSecond = selection.select(22)
+        #expect(!reselectedSecond)
+        #expect(selection.mutationID == 22)
+    }
+
     @Test("meeting list tolerates omitted optional fields")
     func meetingListDecodesSnakeCaseWithoutRequiringOptionalFields() throws {
         let data = Data(#"[{"id":7,"title":"Design review","created_at":"2026-09-23 01:00:00"},{"id":8,"title":"Practice"}]"#.utf8)
