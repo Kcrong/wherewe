@@ -99,6 +99,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var transcriptionCatalogueLanguage: String?
     @Published private(set) var translationLanguagesStatus: TranslationLanguagesResponse?
     @Published private(set) var settingsInProgress = false
+    @Published private(set) var databaseTransitionInProgress = false
     @Published private(set) var speechPreparationInProgress = false
     @Published private(set) var settingsError: String?
 
@@ -146,7 +147,7 @@ final class AppModel: ObservableObject {
     private let realtime: NativeRealtimeClient
     private let coordinator: RecordingCoordinator
     private let capture: CoreAudioCaptureSession
-    private let transcriptStore = TranscriptStore()
+    private var transcriptStore = TranscriptStore()
 
     private var frameTask: Task<Void, Never>?
     private var realtimeEventTask: Task<Void, Never>?
@@ -264,6 +265,7 @@ final class AppModel: ObservableObject {
     var canStartRecording: Bool {
         phase == .ready
             && recordingPhase == .idle
+            && !databaseTransitionInProgress
             && !terminationRequested
             && selectedMeetingID != nil
             && (selectedMicrophone != nil || selectedSystemInput != nil)
@@ -328,12 +330,12 @@ final class AppModel: ObservableObject {
     }
 
     func selectMeeting(_ id: Int?) {
-        guard recordingPhase == .idle else { return }
+        guard recordingPhase == .idle, !databaseTransitionInProgress else { return }
         selectedMeetingID = id
     }
 
     func refreshMeetings() async {
-        guard phase == .ready else { return }
+        guard phase == .ready, !databaseTransitionInProgress else { return }
         do {
             meetings = try await api.meetings()
             if let selectedMeetingID,
@@ -386,7 +388,9 @@ final class AppModel: ObservableObject {
     }
 
     func startRecordingWithoutMeeting() async {
-        guard recordingPhase == .idle, !meetingMutationInProgress else { return }
+        guard recordingPhase == .idle,
+              !meetingMutationInProgress,
+              !databaseTransitionInProgress else { return }
         meetingMutationInProgress = true
         workspaceError = nil
         do {
@@ -407,7 +411,9 @@ final class AppModel: ObservableObject {
     }
 
     func createMeeting() async {
-        guard recordingPhase == .idle, !meetingMutationInProgress else { return }
+        guard recordingPhase == .idle,
+              !meetingMutationInProgress,
+              !databaseTransitionInProgress else { return }
         meetingMutationInProgress = true
         meetingMutationError = nil
         defer { meetingMutationInProgress = false }
@@ -430,7 +436,8 @@ final class AppModel: ObservableObject {
     func saveMeetingDetails() async {
         guard let meetingID = selectedMeetingID,
               recordingPhase == .idle,
-              !meetingMutationInProgress else { return }
+              !meetingMutationInProgress,
+              !databaseTransitionInProgress else { return }
         let title = meetingTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else {
             meetingMutationError = "Meeting title cannot be empty."
@@ -452,7 +459,9 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSelectedMeeting() async {
-        guard let meetingID = selectedMeetingID, !meetingMutationInProgress else { return }
+        guard let meetingID = selectedMeetingID,
+              !meetingMutationInProgress,
+              !databaseTransitionInProgress else { return }
         if recordingPhase == .recording { await stopRecording() }
         guard recordingPhase == .idle else {
             meetingMutationError = "Confirm recording finalisation before deleting this meeting."
@@ -474,7 +483,9 @@ final class AppModel: ObservableObject {
     }
 
     func changeTranslationTarget(_ target: String) async {
-        guard let meetingID = selectedMeetingID, recordingPhase == .idle else { return }
+        guard let meetingID = selectedMeetingID,
+              recordingPhase == .idle,
+              !databaseTransitionInProgress else { return }
         do {
             _ = try await api.updateTranslationTarget(meetingID: meetingID, target: target)
             await resyncTranscriptState()
@@ -504,7 +515,7 @@ final class AppModel: ObservableObject {
     }
 
     func saveSegmentEdit() async {
-        guard let meetingID = selectedMeetingID else { return }
+        guard let meetingID = selectedMeetingID, !databaseTransitionInProgress else { return }
         let text = editingSegmentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         do {
@@ -531,7 +542,7 @@ final class AppModel: ObservableObject {
     }
 
     func retryTranslation(entityType: TranslationEntityType, entityID: Int) async {
-        guard let meetingID = selectedMeetingID else { return }
+        guard let meetingID = selectedMeetingID, !databaseTransitionInProgress else { return }
         do {
             _ = try await api.retryTranslation(
                 meetingID: meetingID,
@@ -558,7 +569,9 @@ final class AppModel: ObservableObject {
     }
 
     func uploadDocuments(_ urls: [URL]) async {
-        guard let meetingID = selectedMeetingID, !fileOperationInProgress else { return }
+        guard let meetingID = selectedMeetingID,
+              !fileOperationInProgress,
+              !databaseTransitionInProgress else { return }
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
@@ -604,7 +617,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteDocument(_ document: UploadedDocument) async {
-        guard !fileOperationInProgress else { return }
+        guard !fileOperationInProgress, !databaseTransitionInProgress else { return }
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
@@ -637,7 +650,7 @@ final class AppModel: ObservableObject {
     }
 
     func addGlossaryEntry() async {
-        guard !glossaryOperationInProgress else { return }
+        guard !glossaryOperationInProgress, !databaseTransitionInProgress else { return }
         let phrase = glossaryPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !phrase.isEmpty else { return }
         glossaryOperationInProgress = true
@@ -672,7 +685,9 @@ final class AppModel: ObservableObject {
     }
 
     func saveGlossaryEdit() async {
-        guard let id = editingGlossaryID, !glossaryOperationInProgress else { return }
+        guard let id = editingGlossaryID,
+              !glossaryOperationInProgress,
+              !databaseTransitionInProgress else { return }
         let phrase = editingGlossaryPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !phrase.isEmpty else { return }
         glossaryOperationInProgress = true
@@ -696,7 +711,7 @@ final class AppModel: ObservableObject {
     }
 
     func deleteGlossaryEntry(_ entry: GlossaryEntry) async {
-        guard !glossaryOperationInProgress else { return }
+        guard !glossaryOperationInProgress, !databaseTransitionInProgress else { return }
         glossaryOperationInProgress = true
         workspaceError = nil
         defer { glossaryOperationInProgress = false }
@@ -857,7 +872,9 @@ final class AppModel: ObservableObject {
 
     // Returns true only when first-run setup completed and the Settings window should close.
     func saveSettings() async -> Bool {
-        guard var draft = settingsDraft, !settingsInProgress else { return false }
+        guard var draft = settingsDraft,
+              !settingsInProgress,
+              !databaseTransitionInProgress else { return false }
         guard (draft.paths.database as NSString).isAbsolutePath,
               (draft.paths.files as NSString).isAbsolutePath else {
             settingsError = "Storage paths must be absolute."
@@ -876,15 +893,32 @@ final class AppModel: ObservableObject {
             draft.user.profile = "Uses on-device Apple transcription and translation."
         }
 
+        let switchesDatabase = settingsDocument?.paths.database != draft.paths.database
+        if switchesDatabase,
+           meetingMutationInProgress || fileOperationInProgress || glossaryOperationInProgress {
+            settingsError = "Wait for the current meeting operation to finish before changing databases."
+            return false
+        }
+
         settingsInProgress = true
+        databaseTransitionInProgress = switchesDatabase
         settingsError = nil
-        defer { settingsInProgress = false }
+        if switchesDatabase { clearDatabaseBackedState() }
+        defer {
+            databaseTransitionInProgress = false
+            settingsInProgress = false
+        }
         let completesInitialSetup = initialSetupCompletionPending || settingsDocument?.configured != true
+        var databaseStateReloaded = false
         do {
             let envelope = try await api.updateSettings(draft, etag: settingsETag)
             settingsDocument = envelope.document
             settingsETag = envelope.etag
             settingsDraft = envelope.document.updateRequest
+            if switchesDatabase {
+                await reloadDatabaseBackedState()
+                databaseStateReloaded = true
+            }
             let catalogueLanguage = recognitionLanguage
             let catalogue = try await api.transcriptionCatalogue(language: catalogueLanguage)
             applyTranscriptionCatalogue(catalogue, for: catalogueLanguage)
@@ -893,9 +927,62 @@ final class AppModel: ObservableObject {
                 return phase == .ready
             }
         } catch {
-            settingsError = error.localizedDescription
+            let message = error.localizedDescription
+            if switchesDatabase, !databaseStateReloaded {
+                await reloadDatabaseBackedState()
+            }
+            settingsError = message
         }
         return false
+    }
+
+    private func clearDatabaseBackedState() {
+        meetingLoadGeneration += 1
+        meetings = []
+        selectedMeetingID = nil
+        meetingDetail = nil
+        showingNewMeeting = false
+        showingDeleteMeetingConfirmation = false
+        newMeetingTitle = ""
+        meetingTitleDraft = ""
+        meetingContextDraft = ""
+        meetingMutationError = nil
+        meetingSearchText = ""
+
+        transcriptStore = TranscriptStore()
+        transcriptItems = []
+        transcriptAutoFollowByMeetingID = [:]
+        transcriptSearchText = ""
+        editingSegmentID = nil
+        editingTranscriptID = nil
+        editingSegmentText = ""
+
+        documents = []
+        documentPreview = nil
+        globalGlossary = []
+        meetingGlossary = []
+        glossaryPhrase = ""
+        glossaryDisplayAs = ""
+        editingGlossaryID = nil
+        editingGlossaryPhrase = ""
+        editingGlossaryDisplayAs = ""
+        exportResult = nil
+        workspaceError = nil
+
+        restoringMeetingValues = true
+        recognitionLanguage = preferredRecognitionLanguage
+        translationTarget = preferredTranslationTarget
+        restoringMeetingValues = false
+    }
+
+    private func reloadDatabaseBackedState() async {
+        do {
+            meetings = try await api.meetings()
+            selectedMeetingID = meetings.first?.id
+            await loadSelectedMeeting()
+        } catch {
+            workspaceError = error.localizedDescription
+        }
     }
 
     func refreshAudioDevices() {
