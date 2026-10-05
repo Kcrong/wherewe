@@ -25,15 +25,18 @@ public final class DualInputSynchronizer: @unchecked Sendable {
     public enum SynchronizerError: Error, Equatable, Sendable {
         case noSources
         case unsupportedSampleRate
+        case unsupportedSynchronizationWindow
         case unexpectedSource
     }
 
     public let sampleRate: Int
     public let frameDurationMilliseconds: Int
+    public let maximumSynchronizationLagMilliseconds: Int
     public let sources: Set<AudioInputSource>
     public let channelCount: Int
 
     private let samplesPerChannelFrame: Int64
+    private let maximumSynchronizationLagSamples: Int64
     private let lock = NSLock()
     private var originHostTimeNanoseconds: UInt64?
     private var samples: [AudioInputSource: [Int64: Int16]] = [:]
@@ -45,6 +48,7 @@ public final class DualInputSynchronizer: @unchecked Sendable {
         sources: Set<AudioInputSource>,
         sampleRate: Int = 48_000,
         frameDurationMilliseconds: Int = 100,
+        maximumSynchronizationLagMilliseconds: Int = 500,
         originHostTimeNanoseconds: UInt64? = nil
     ) throws {
         guard !sources.isEmpty else { throw SynchronizerError.noSources }
@@ -53,11 +57,19 @@ public final class DualInputSynchronizer: @unchecked Sendable {
               (sampleRate * frameDurationMilliseconds).isMultiple(of: 1_000) else {
             throw SynchronizerError.unsupportedSampleRate
         }
+        guard maximumSynchronizationLagMilliseconds >= frameDurationMilliseconds,
+              maximumSynchronizationLagMilliseconds.isMultiple(of: frameDurationMilliseconds) else {
+            throw SynchronizerError.unsupportedSynchronizationWindow
+        }
+        let samplesPerChannelFrame = Int64(sampleRate * frameDurationMilliseconds / 1_000)
         self.sources = sources
         self.sampleRate = sampleRate
         self.frameDurationMilliseconds = frameDurationMilliseconds
+        self.maximumSynchronizationLagMilliseconds = maximumSynchronizationLagMilliseconds
         self.channelCount = sources.count == 2 ? 2 : 1
-        self.samplesPerChannelFrame = Int64(sampleRate * frameDurationMilliseconds / 1_000)
+        self.samplesPerChannelFrame = samplesPerChannelFrame
+        self.maximumSynchronizationLagSamples = samplesPerChannelFrame
+            * Int64(maximumSynchronizationLagMilliseconds / frameDurationMilliseconds)
         self.originHostTimeNanoseconds = originHostTimeNanoseconds
         for source in sources {
             samples[source] = [:]
@@ -130,8 +142,15 @@ public final class DualInputSynchronizer: @unchecked Sendable {
     }
 
     private func drainCompleteFrames() -> [[Int16]] {
+        let synchronizedThrough = watermarks.values.min() ?? nextFrameStart
+        let newestThrough = watermarks.values.max() ?? nextFrameStart
+        // Keep a bounded window for a delayed input. Once the newest input is
+        // farther ahead, frames outside that window use silence for missing samples.
+        let timedOutThrough = newestThrough - maximumSynchronizationLagSamples
+        let availableThrough = max(synchronizedThrough, timedOutThrough)
+
         var frames: [[Int16]] = []
-        while sources.allSatisfy({ (watermarks[$0] ?? 0) >= nextFrameStart + samplesPerChannelFrame }) {
+        while nextFrameStart + samplesPerChannelFrame <= availableThrough {
             let end = nextFrameStart + samplesPerChannelFrame
             frames.append(render(start: nextFrameStart, end: end))
             discard(before: end)
