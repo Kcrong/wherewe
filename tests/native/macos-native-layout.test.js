@@ -181,6 +181,24 @@ test("meeting and CoreAudio recording controls remain available", () => {
   assert.match(model, /RecordingCoordinator\(api: service, realtime: realtime\)/);
 });
 
+test("PCM delivery failure stops capture before finalization", () => {
+  const framePumpStart = model.indexOf("private func startFramePump() {");
+  const framePumpEnd = model.indexOf("\n    private func markDrained", framePumpStart);
+  const stopRequestStart = model.indexOf("private func requestStopAfterAudioDeliveryFailure() {");
+  const stopRequestEnd = model.indexOf("\n    private func markDrained", stopRequestStart);
+  assert.notEqual(framePumpStart, -1, "missing capture frame pump");
+  assert.ok(framePumpEnd > framePumpStart, "missing capture frame pump boundary");
+  assert.notEqual(stopRequestStart, -1, "missing delivery failure stop request");
+  assert.ok(stopRequestEnd > stopRequestStart, "missing delivery failure stop boundary");
+
+  const framePump = scanner.swiftCodeOnly(model.slice(framePumpStart, framePumpEnd));
+  const stopRequest = scanner.swiftCodeOnly(model.slice(stopRequestStart, stopRequestEnd));
+  assert.match(framePump, /catch \{[\s\S]*recordingError = error\.localizedDescription[\s\S]*requestStopAfterAudioDeliveryFailure\(\)/);
+  assert.match(stopRequest, /guard recordingPhase == \.recording, recordingStopTask == nil/);
+  assert.match(stopRequest, /preserveRecordingErrorOnNextStop = true/);
+  assert.match(stopRequest, /await self\.performStopRecording\(\)/);
+});
+
 test("workspace contains only retained local tools", () => {
   assert.deepEqual(
     [...model.matchAll(/^\s{8}case (transcript|files|glossary|export)$/gm)].map((match) => match[1]),
