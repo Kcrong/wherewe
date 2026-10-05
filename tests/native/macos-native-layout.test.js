@@ -27,6 +27,10 @@ const modelTests = fs.readFileSync(
   path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/ModelsTests.swift"),
   "utf8"
 );
+const coreModels = fs.readFileSync(
+  path.join(ROOT, "macos/Sources/MeetingTranscriberCore/Models.swift"),
+  "utf8"
+);
 
 function swiftView(name, nextName) {
   const start = view.indexOf(`private struct ${name}: View {`);
@@ -208,6 +212,10 @@ test("meeting selection clears stale state and fences meeting mutations", () => 
   assert.notEqual(clearStart, -1, "missing meeting state invalidation");
   assert.ok(clearEnd > clearStart, "missing meeting state invalidation boundary");
   assert.match(model, /@Published private var meetingSelection = MeetingSelectionState\(\)/);
+  assert.match(
+    coreModels,
+    /package struct MeetingSelectionState:[\s\S]{0,180}package init\(\) \{[\s\S]{0,100}selectedID = nil[\s\S]{0,100}loadedID = nil/
+  );
   assert.match(model, /var selectedMeetingID: Int\? \{ meetingSelection\.selectedID \}/);
   assert.match(model, /var selectedMeetingIsLoaded: Bool \{ loadedSelectedMeetingID != nil \}/);
   assert.match(

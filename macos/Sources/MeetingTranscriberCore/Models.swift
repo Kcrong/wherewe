@@ -114,6 +114,11 @@ package struct MeetingSelectionState: Equatable, Sendable {
     package private(set) var selectedID: Int?
     package private(set) var loadedID: Int?
 
+    package init() {
+        selectedID = nil
+        loadedID = nil
+    }
+
     @discardableResult
     package mutating func select(_ id: Int?) -> Bool {
         guard selectedID != id else { return false }
