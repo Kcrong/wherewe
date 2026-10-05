@@ -225,7 +225,7 @@ test("transcript search copy editing and translation retry remain", () => {
   );
   assert.match(
     modelTests,
-    /an earlier save cannot clear a newer transcript edit[\s\S]*!operations\.finish\(earlier\)[\s\S]*operations\.activeID == newer/
+    /an earlier save cannot clear a newer transcript edit[\s\S]*let earlierFinished = operations\.finish\(earlier\)[\s\S]*!earlierFinished[\s\S]*operations\.activeID == newer/
   );
 });
 

@@ -96,9 +96,12 @@ struct ModelsTests {
         let earlier = operations.begin()
         let newer = operations.begin()
 
-        #expect(!operations.finish(earlier))
+        let earlierFinished = operations.finish(earlier)
+        #expect(!earlierFinished)
         #expect(operations.activeID == newer)
-        #expect(operations.finish(newer))
+
+        let newerFinished = operations.finish(newer)
+        #expect(newerFinished)
         #expect(operations.activeID == nil)
     }
 }
