@@ -281,3 +281,18 @@ test("application termination waits for recording finalization before replying",
   assert.ok(!scanner.swiftCodeOnly(nestedCommentedReply).includes(terminationReplyCall));
   assert.ok(!scanner.swiftCodeOnly(rawStringifiedReply).includes(terminationReplyCall));
 });
+
+test("new windows preserve an established connection during recording", () => {
+  const connectStart = model.indexOf("func connect() async {");
+  const connectEnd = model.indexOf("\n    func selectMeeting", connectStart);
+  assert.notEqual(connectStart, -1, "missing connect");
+  assert.ok(connectEnd > connectStart, "missing connect boundary");
+  const connect = model.slice(connectStart, connectEnd);
+
+  const establishedGuard = connect.indexOf("guard phase != .ready else { return }");
+  const phaseReset = connect.indexOf("phase = .connecting");
+  const statusRead = connect.indexOf("api.recordingStatus(socketID: realtime.clientID)");
+  assert.ok(establishedGuard >= 0, "an established shared model must ignore repeated setup");
+  assert.ok(phaseReset > establishedGuard, "the guard must preserve the ready UI state");
+  assert.ok(statusRead > establishedGuard, "the guard must not re-adopt the active recording claim");
+});
