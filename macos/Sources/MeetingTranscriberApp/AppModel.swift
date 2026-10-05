@@ -162,6 +162,7 @@ final class AppModel: ObservableObject {
     private var terminationRequested = false
     private var levelMeter: CaptureLevelMeter?
     private var meetingLoadGeneration = 0
+    private var exportRequestScope = MeetingExportRequestScope()
     private var restoringMeetingValues = false
     private var suppressDisconnectRecovery = false
     private var initialSetupCompletionPending = false
@@ -345,6 +346,7 @@ final class AppModel: ObservableObject {
         var nextSelection = meetingSelection
         guard nextSelection.select(id) else { return }
         meetingSelection = nextSelection
+        _ = exportRequestScope.selectMeeting(id)
         meetingLoadGeneration += 1
         clearMeetingDependentState()
     }
@@ -767,13 +769,18 @@ final class AppModel: ObservableObject {
     }
 
     func exportSelectedMeeting() async {
-        guard let meetingID = loadedSelectedMeetingID else { return }
+        guard let meetingID = loadedSelectedMeetingID,
+              let request = exportRequestScope.begin(for: meetingID) else { return }
+        exportResult = nil
         workspaceError = nil
         do {
-            let result = try await api.exportMeeting(id: meetingID)
-            guard loadedSelectedMeetingID == meetingID else { return }
+            let result = try await api.exportMeeting(id: request.meetingID)
+            guard loadedSelectedMeetingID == meetingID,
+                  exportRequestScope.isCurrent(request) else { return }
             exportResult = result
         } catch {
+            guard loadedSelectedMeetingID == meetingID,
+                  exportRequestScope.isCurrent(request) else { return }
             workspaceError = error.localizedDescription
         }
     }
@@ -982,9 +989,8 @@ final class AppModel: ObservableObject {
     }
 
     private func clearDatabaseBackedState() {
-        meetingLoadGeneration += 1
+        updateMeetingSelection(nil)
         meetings = []
-        meetingSelection = MeetingSelectionState()
         meetingDetail = nil
         showingNewMeeting = false
         showingDeleteMeetingConfirmation = false

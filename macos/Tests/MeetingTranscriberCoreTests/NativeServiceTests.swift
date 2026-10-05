@@ -583,6 +583,35 @@ struct NativeServiceTests {
         #expect(FileManager.default.fileExists(atPath: replacementFiles.path))
     }
 
+    @Test("selection changes keep stale export requests from publishing")
+    func exportRequestScopeRejectsSelectionChanges() throws {
+        var scope = MeetingExportRequestScope()
+        let missingRequest = scope.begin(for: nil)
+        #expect(missingRequest == nil)
+
+        let selectedFirstMeeting = scope.selectMeeting(41)
+        #expect(selectedFirstMeeting)
+        let mismatchedRequest = scope.begin(for: 42)
+        #expect(mismatchedRequest == nil)
+        let firstRequest = scope.begin(for: 41)
+        let staleRequest = try #require(firstRequest)
+        #expect(scope.isCurrent(staleRequest))
+
+        let selectedSecondMeeting = scope.selectMeeting(42)
+        let returnedToFirstMeeting = scope.selectMeeting(41)
+        #expect(selectedSecondMeeting)
+        #expect(returnedToFirstMeeting)
+        #expect(!scope.isCurrent(staleRequest))
+
+        let nextRequest = scope.begin(for: 41)
+        let currentRequest = try #require(nextRequest)
+        #expect(scope.isCurrent(currentRequest))
+        let latestRequest = scope.begin(for: 41)
+        let newerRequest = try #require(latestRequest)
+        #expect(!scope.isCurrent(currentRequest))
+        #expect(scope.isCurrent(newerRequest))
+    }
+
     @Test("attachments glossary and export stay local and secure")
     func workspacePersistenceAndExport() async throws {
         let fixture = try Fixture()

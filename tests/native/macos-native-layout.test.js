@@ -127,11 +127,9 @@ test("database changes clear and reload application state before mutations resum
   assert.ok(clearCall < databaseUpdate);
   assert.ok(databaseUpdate < reloadCall);
 
-  assert.match(clearState, /meetingLoadGeneration \+= 1/);
-  assert.match(
-    clearState,
-    /meetings = \[\][\s\S]*meetingSelection = MeetingSelectionState\(\)[\s\S]*meetingDetail = nil/
-  );
+  assert.match(clearState, /updateMeetingSelection\(nil\)/);
+  assert.doesNotMatch(clearState, /meetingSelection = MeetingSelectionState\(\)/);
+  assert.match(clearState, /meetings = \[\][\s\S]*meetingDetail = nil/);
   assert.match(clearState, /meetingTitleDraft = ""[\s\S]*meetingContextDraft = ""/);
   assert.match(clearState, /transcriptStore = TranscriptStore\(\)[\s\S]*transcriptItems = \[\]/);
   assert.match(clearState, /documents = \[\][\s\S]*globalGlossary = \[\][\s\S]*meetingGlossary = \[\]/);
@@ -343,6 +341,38 @@ test("live transcript follows the bottom until the user scrolls away", () => {
   assert.match(transcriptPane, /\.onScrollPhaseChange \{ oldPhase, newPhase, context in[\s\S]{0,420}recordTranscriptUserScroll[\s\S]{0,160}context\.geometry/);
   assert.match(model, /transcriptAutoFollowByMeetingID: \[Int: TranscriptAutoFollowState\]/);
   assert.doesNotMatch(transcriptPane, /Task\.yield\(\)|\.onChange\(of: filteredItems\)|\.onAppear[\s\S]{0,80}scrollTo/);
+});
+
+test("export results stay with the loaded selected meeting and latest request", () => {
+  const selectionStart = model.indexOf("private func updateMeetingSelection(_ id: Int?) {");
+  const selectionEnd = model.indexOf("\n    private func clearMeetingDependentState()", selectionStart);
+  const databaseResetStart = model.indexOf("private func clearDatabaseBackedState() {");
+  const databaseResetEnd = model.indexOf("\n    private func reloadDatabaseBackedState()", databaseResetStart);
+  const exportStart = model.indexOf("func exportSelectedMeeting() async {");
+  const exportEnd = model.indexOf("\n    func revealExport()", exportStart);
+  const selection = model.slice(selectionStart, selectionEnd);
+  const databaseReset = model.slice(databaseResetStart, databaseResetEnd);
+  const exportFlow = model.slice(exportStart, exportEnd);
+
+  assert.notEqual(selectionStart, -1, "missing selection update flow");
+  assert.ok(selectionEnd > selectionStart, "missing selection update boundary");
+  assert.notEqual(databaseResetStart, -1, "missing database state reset");
+  assert.ok(databaseResetEnd > databaseResetStart, "missing database state reset boundary");
+  assert.notEqual(exportStart, -1, "missing export flow");
+  assert.ok(exportEnd > exportStart, "missing export flow boundary");
+  assert.match(model, /var selectedMeetingID: Int\? \{ meetingSelection\.selectedID \}/);
+  assert.match(
+    selection,
+    /guard nextSelection\.select\(id\) else \{ return \}[\s\S]*meetingSelection = nextSelection[\s\S]*exportRequestScope\.selectMeeting\(id\)[\s\S]*clearMeetingDependentState\(\)/
+  );
+  assert.match(databaseReset, /updateMeetingSelection\(nil\)/);
+  assert.match(exportFlow, /guard let meetingID = loadedSelectedMeetingID,[\s\S]*exportRequestScope\.begin\(for: meetingID\)/);
+  assert.match(exportFlow, /exportResult = nil[\s\S]*api\.exportMeeting\(id: request\.meetingID\)/);
+  assert.equal(
+    (exportFlow.match(/guard loadedSelectedMeetingID == meetingID,\s*exportRequestScope\.isCurrent\(request\) else \{ return \}/g) || []).length,
+    2
+  );
+  assert.ok(exportFlow.indexOf("isCurrent(request)") < exportFlow.indexOf("exportResult = result"));
 });
 
 test("attachments glossary and export remain local UI surfaces", () => {
