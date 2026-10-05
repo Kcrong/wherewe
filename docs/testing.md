@@ -5,10 +5,10 @@ proves. Source inventories are checked by `testing-strategy.test.js`.
 
 ## Current inventory
 
-- Swift test sources: 26 files, 23 suites, 86 declared tests.
-- Deterministic Swift baseline: 81 tests.
+- Swift test sources: 26 files, 23 suites, 87 declared tests.
+- Deterministic Swift baseline: 82 tests.
 - Opt-in Swift runtime and hardware checks: 5 tests across 3 environment keys.
-- Node source contracts: 13 files, 62 declared tests.
+- Node source contracts: 13 files, 63 declared tests.
 - `MeetingTranscriberCoreChecks` is a separate executable smoke contract.
 - App and DMG checks are shell integration tests, not GUI automation.
 
@@ -129,7 +129,7 @@ exits successfully.
 | CoreAudio and realtime ownership | Deterministic framing/synchronization suites and generation fencing | Hardware, TCC, route changes, unplug, and sleep/wake remain manual |
 | Apple Speech and Translation | Advisory hosted probes plus required local generated-speech and installed-pack evidence | Test each draft-release DMG with installed assets on a real Mac before publishing |
 | Storage and attachments | Path-policy contracts plus security, deletion-failure, and retry tests | Exercise sandbox and external-volume permission failures manually |
-| Export rollback | Collision and cancellation tests require complete partial-directory removal | Add destination-selection GUI coverage if introduced |
+| Export rollback and result scope | Collision and cancellation rollback plus selected-meeting request ownership | Add destination-selection GUI coverage if introduced |
 | Retry and recovery | Translation restart and recording finalisation tests | Keep retries explicit and bounded |
 | Bundle and DMG | Architecture, minimum OS, signature mode, entitlement, launch/relaunch, mounted layout, payload rejection, and draft asset checksum | Publish only a Developer ID signed and notarised draft; keep ad-hoc drafts for hands-on testing |
 | Release secrets | Pre-secret release gate precedes credential inspection; zero/all/partial sets select ad-hoc/signed/fail-closed modes | Protect release environment and configure all five secrets before production publication |
