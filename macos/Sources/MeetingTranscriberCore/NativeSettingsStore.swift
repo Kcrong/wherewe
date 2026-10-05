@@ -43,7 +43,11 @@ final class NativeSettingsStore {
         } else if let document = try? decoder.decode(SettingsDocument.self, from: data) {
             request = document.updateRequest
         } else {
-            throw NativeServiceError.server(status: 400, code: "SETTINGS_INVALID", message: "The settings file is not valid.")
+            throw NativeServiceError.server(
+                status: 400,
+                code: "SETTINGS_INVALID",
+                message: "The settings file is not valid."
+            )
         }
         return try prepareUpdate(request, etag: etag)
     }
@@ -53,20 +57,6 @@ final class NativeSettingsStore {
         request.paths = try NativeStoragePathPolicy.canonicalize(request.paths)
         try validate(request)
         try validateRevision(etag)
-
-        _ = try NativeStoragePathPolicy.secureDirectory(
-            configuration.configURL.deletingLastPathComponent(),
-            fileManager: fileManager
-        )
-        _ = try NativeStoragePathPolicy.secureDirectory(
-            URL(fileURLWithPath: request.paths.files, isDirectory: true),
-            fileManager: fileManager
-        )
-        _ = try NativeStoragePathPolicy.validateDatabaseURL(
-            URL(fileURLWithPath: request.paths.database),
-            fileManager: fileManager
-        )
-
         return PreparedUpdate(
             request: request,
             etag: etag,
@@ -74,8 +64,25 @@ final class NativeSettingsStore {
         )
     }
 
+    func prepareStorage(for prepared: PreparedUpdate) throws {
+        _ = try NativeStoragePathPolicy.secureDirectory(
+            configuration.configURL.deletingLastPathComponent(),
+            fileManager: fileManager
+        )
+        _ = try NativeStoragePathPolicy.secureDirectory(
+            URL(fileURLWithPath: prepared.document.paths.files, isDirectory: true),
+            fileManager: fileManager
+        )
+        _ = try NativeStoragePathPolicy.validateDatabaseURL(
+            URL(fileURLWithPath: prepared.document.paths.database),
+            fileManager: fileManager
+        )
+    }
+
     func update(_ submitted: SettingsUpdateRequest, etag: String?) throws -> SettingsEnvelope {
-        try commit(prepareUpdate(submitted, etag: etag))
+        let prepared = try prepareUpdate(submitted, etag: etag)
+        try prepareStorage(for: prepared)
+        return try commit(prepared)
     }
 
     func commit(_ prepared: PreparedUpdate) throws -> SettingsEnvelope {
