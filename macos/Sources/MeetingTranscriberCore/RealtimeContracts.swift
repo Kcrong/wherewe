@@ -37,12 +37,20 @@ public struct RealtimeAcknowledgement: Codable, Equatable, Sendable {
     public let code: String?
     public let meetingID: Int?
     public let generation: Int64?
+    public let audioByteCount: Int?
 
-    public init(success: Bool, code: String?, meetingID: Int?, generation: Int64?) {
+    public init(
+        success: Bool,
+        code: String?,
+        meetingID: Int?,
+        generation: Int64?,
+        audioByteCount: Int? = nil
+    ) {
         self.success = success
         self.code = code
         self.meetingID = meetingID
         self.generation = generation
+        self.audioByteCount = audioByteCount
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -50,6 +58,7 @@ public struct RealtimeAcknowledgement: Codable, Equatable, Sendable {
         case code
         case meetingID = "meetingId"
         case generation
+        case audioByteCount
     }
 }
 

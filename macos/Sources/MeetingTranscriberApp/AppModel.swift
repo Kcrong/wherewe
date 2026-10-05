@@ -158,6 +158,7 @@ final class AppModel: ObservableObject {
     private var recordingStartTask: Task<Void, Never>?
     private var recordingStopTask: Task<Void, Never>?
     private var recordingRetryTask: Task<Void, Never>?
+    private var preserveRecordingErrorOnNextStop = false
     private var shutdownTask: Task<Bool, Never>?
     private var terminationRequested = false
     private var levelMeter: CaptureLevelMeter?
@@ -1131,9 +1132,11 @@ final class AppModel: ObservableObject {
 
     private func performStopRecording() async {
         guard recordingPhase == .recording else { return }
+        let preserveRecordingError = preserveRecordingErrorOnNextStop
+        preserveRecordingErrorOnNextStop = false
         recordingPhase = .stopping
         stopRecordingTimer()
-        recordingError = nil
+        if !preserveRecordingError { recordingError = nil }
         let activeClaim: RecordingClaim? = if case let .recording(claim) = await coordinator.state {
             claim
         } else {
@@ -1421,12 +1424,26 @@ final class AppModel: ObservableObject {
                 case let .frame(samples):
                     self.noteCapturedAudio(samples)
                     do { try await self.coordinator.sendPCM(samples) }
-                    catch { self.recordingError = error.localizedDescription }
+                    catch {
+                        self.recordingError = error.localizedDescription
+                        self.requestStopAfterAudioDeliveryFailure()
+                    }
                 case let .drained(token):
                     self.markDrained(token)
                 }
             }
         }
+    }
+
+    private func requestStopAfterAudioDeliveryFailure() {
+        guard recordingPhase == .recording, recordingStopTask == nil else { return }
+        preserveRecordingErrorOnNextStop = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performStopRecording()
+            self.recordingStopTask = nil
+        }
+        recordingStopTask = task
     }
 
     private func markDrained(_ token: UUID) {

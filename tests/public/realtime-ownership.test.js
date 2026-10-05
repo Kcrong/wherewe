@@ -85,9 +85,10 @@ test("recording finalization retries preserve one claim and commit exactly once"
   assert.match(realtimeStop, /finishRealtimeTranscription\([\s\S]*audioSession\?\.id == session\.id[\s\S]*audioSession = nil[\s\S]*removeItem/);
   assert.doesNotMatch(coordinatorStop, /let socketStop = try\? await realtime\.stopTranscription/);
   assert.match(coordinatorStop, /catch[\s\S]*state = \.recoveryRequired\(claim\)[\s\S]*throw/);
-  assert.match(coordinatorStop, /socketStop\.code == "AUDIO_SESSION_UNAVAILABLE"[\s\S]*finalizeClaimViaService/);
+  assert.match(coordinatorStop, /socketStop\.code == "AUDIO_SESSION_UNAVAILABLE"[\s\S]*expectedAudioByteCount == 0[\s\S]*finalizeClaimViaService/);
   assert.doesNotMatch(finalizeClaim, /try\? await realtime\.stopTranscription/);
-  assert.match(finalizeClaim, /guard acknowledgement\.code == "AUDIO_SESSION_UNAVAILABLE" else \{ return false \}/);
+  assert.match(finalizeClaim, /guard allowsServiceFallback,[\s\S]*acknowledgement\.code == "AUDIO_SESSION_UNAVAILABLE" else \{ return false \}/);
+  assert.match(coordinator, /let allowsServiceFallback = !tracksAudioDelivery \|\| expectedAudioByteCount == 0/);
   assert.doesNotMatch(coordinator, /catch let error as NativeServiceError[\s\S]{0,240}RECORDING_CLAIM_STALE/);
   assert.match(coordinator, /case retryingFinalization\(RecordingClaim\)/);
   assert.match(coordinator, /func retryFinalization\(\)[\s\S]*state = \.retryingFinalization\(claim\)[\s\S]*state = \.recoveryRequired\(claim\)[\s\S]*state = \.idle/);
@@ -95,6 +96,7 @@ test("recording finalization retries preserve one claim and commit exactly once"
   assert.match(regressions, /verifyOwnedAudioRetry\(\)/);
   assert.match(regressions, /verifyPartialPersistenceRetry\(\)/);
   assert.match(regressions, /verifyConnectedOwnerIsNotFinalized\(\)/);
+  assert.match(regressions, /tracked PCM cannot bypass its spool through service finalization/);
   assert.match(regressions, /recordingOwnedByRequester/);
   assert.match(regressions, /payloads\[0\] == payloads\[2\]/);
   assert.match(regressions, /Recovered final transcript/);
@@ -106,7 +108,7 @@ test("recording finalization retries preserve one claim and commit exactly once"
   );
   assert.match(
     coordinator,
-    /func retryFinalization\(\)[\s\S]*guard await finalizeClaim\(claim\) else[\s\S]*state = \.idle/
+    /func retryFinalization\(\)[\s\S]*guard await finalizeClaim\(claim, allowsServiceFallback: allowsServiceFallback\) else[\s\S]*state = \.idle/
   );
   assert.match(regressions, /finalization retry fail fail succeed preserves one recovery claim and one commit/);
   assert.match(regressions, /remainingFailures: 4/);

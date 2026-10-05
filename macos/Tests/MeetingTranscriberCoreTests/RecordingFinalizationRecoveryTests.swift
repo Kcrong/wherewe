@@ -83,6 +83,114 @@ struct RecordingFinalizationRecoveryTests {
         try await verifyConnectedOwnerIsNotFinalized()
     }
 
+    @Test("failed PCM write stays queued until stop retries it")
+    func failedPCMWriteIsRetried() async throws {
+        let fixture = try FinalizationRecoveryFixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Retry PCM delivery"))
+        let baseRealtime = NativeRealtimeClient(service: service)
+        let realtime = PCMDeliveryFaultRealtime(base: baseRealtime, fault: .failOnce(attempt: 2))
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime)
+        let claim = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+
+        await #expect(throws: RecordingCoordinatorError.audioDeliveryFailed) {
+            try await coordinator.sendPCM([Int16](repeating: 1, count: 3_200))
+        }
+        #expect(await coordinator.state == .recording(claim))
+        #expect(realtime.sendAttempts() == 2)
+        #expect(realtime.deliveredByteCount() == 3_200)
+
+        let outcome = try await coordinator.stop()
+        #expect(outcome.audioDeliveryConfirmed)
+        #expect(realtime.sendAttempts() == 3)
+        #expect(realtime.deliveredByteCount() == 6_400)
+        #expect(realtime.barrierByteCounts() == [6_400])
+        #expect(realtime.stopAttempts() == 1)
+        #expect(try await service.meeting(id: meeting.id).endedAt != nil)
+
+        await coordinator.close()
+        await service.shutdown()
+    }
+
+    @Test("finalization rejects a spool shorter than captured PCM")
+    func incompletePCMBlocksFinalization() async throws {
+        let fixture = try FinalizationRecoveryFixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Reject incomplete PCM"))
+        let baseRealtime = NativeRealtimeClient(service: service)
+        let realtime = PCMDeliveryFaultRealtime(base: baseRealtime, fault: .truncate(bytes: 2))
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime)
+        let claim = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        try await coordinator.sendPCM([Int16](repeating: 1, count: 1_600))
+
+        await #expect(throws: RecordingCoordinatorError.audioDeliveryIncomplete) {
+            _ = try await coordinator.stop()
+        }
+        #expect(await coordinator.state == .recoveryRequired(claim))
+        #expect(realtime.deliveredByteCount() == 3_198)
+        #expect(realtime.barrierByteCounts() == [3_198])
+        #expect(realtime.stopAttempts() == 0)
+        let unfinished = try await service.meeting(id: meeting.id)
+        #expect(unfinished.endedAt == nil)
+        #expect(unfinished.transcripts.isEmpty)
+
+        await coordinator.close()
+        await service.shutdown()
+    }
+
+    @Test("tracked PCM cannot bypass its spool through service finalization")
+    func trackedPCMDoesNotUseServiceFallback() async throws {
+        let fixture = try FinalizationRecoveryFixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Keep tracked PCM owned"))
+        let baseRealtime = NativeRealtimeClient(service: service)
+        let realtime = PCMDeliveryFaultRealtime(
+            base: baseRealtime,
+            fault: .none,
+            disconnectAfterBarrier: true
+        )
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime)
+        let claim = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        try await coordinator.sendPCM([Int16](repeating: 1, count: 1_600))
+
+        await #expect(throws: RecordingCoordinatorError.finalizationUnconfirmed) {
+            _ = try await coordinator.stop()
+        }
+        #expect(await coordinator.state == .recoveryRequired(claim))
+        #expect(realtime.barrierByteCounts() == [3_200])
+        #expect(realtime.stopAttempts() == 1)
+        let unfinished = try await service.meeting(id: meeting.id)
+        #expect(unfinished.endedAt == nil)
+        #expect(unfinished.transcripts.isEmpty)
+
+        await coordinator.close()
+        await service.shutdown()
+    }
+
     private func verifyOwnedAudioRetry() async throws {
         let fixture = try FinalizationRecoveryFixture()
         defer { fixture.remove() }
@@ -360,6 +468,90 @@ private actor FinalizationAttemptSequence {
 private enum FinalizationTestFailure: Error {
     case injected
     case timeout
+}
+
+private final class PCMDeliveryFaultRealtime: RealtimeServing, @unchecked Sendable {
+    enum Fault {
+        case none
+        case failOnce(attempt: Int)
+        case truncate(bytes: Int)
+    }
+
+    var messages: AsyncStream<RealtimeMessage> { base.messages }
+    var clientID: String? { base.clientID }
+
+    private let base: NativeRealtimeClient
+    private let fault: Fault
+    private let disconnectAfterBarrier: Bool
+    private let lock = NSLock()
+    private var sends = 0
+    private var deliveredBytes = 0
+    private var barriers: [Int] = []
+    private var stops = 0
+
+    init(
+        base: NativeRealtimeClient,
+        fault: Fault,
+        disconnectAfterBarrier: Bool = false
+    ) {
+        self.base = base
+        self.fault = fault
+        self.disconnectAfterBarrier = disconnectAfterBarrier
+    }
+
+    func connect() async throws { try await base.connect() }
+    func disconnect() { base.disconnect() }
+    func startTranscription(_ request: StartTranscriptionRequest) { base.startTranscription(request) }
+
+    func sendAudio(_ data: Data) throws {
+        let payload = try withLock { () -> Data in
+            sends += 1
+            switch fault {
+            case let .failOnce(attempt) where sends == attempt:
+                throw FinalizationTestFailure.injected
+            case let .truncate(bytes):
+                return Data(data.dropLast(min(bytes, data.count)))
+            default:
+                return data
+            }
+        }
+        try base.sendAudio(payload)
+        withLock { deliveredBytes += payload.count }
+    }
+
+    func audioBarrier(
+        meetingID: Int,
+        generation: Int64
+    ) async throws -> RealtimeAcknowledgement {
+        let acknowledgement = try await base.audioBarrier(
+            meetingID: meetingID,
+            generation: generation
+        )
+        if let audioByteCount = acknowledgement.audioByteCount {
+            withLock { barriers.append(audioByteCount) }
+        }
+        if disconnectAfterBarrier { base.disconnect() }
+        return acknowledgement
+    }
+
+    func stopTranscription(
+        meetingID: Int,
+        generation: Int64
+    ) async throws -> RealtimeAcknowledgement {
+        withLock { stops += 1 }
+        return try await base.stopTranscription(meetingID: meetingID, generation: generation)
+    }
+
+    func sendAttempts() -> Int { withLock { sends } }
+    func deliveredByteCount() -> Int { withLock { deliveredBytes } }
+    func barrierByteCounts() -> [Int] { withLock { barriers } }
+    func stopAttempts() -> Int { withLock { stops } }
+
+    private func withLock<Value>(_ operation: () throws -> Value) rethrows -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
 }
 
 private struct FinalizationRecoveryFixture {

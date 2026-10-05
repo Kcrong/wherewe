@@ -251,18 +251,27 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         meetingID: Int,
         generation: Int64
     ) async throws -> RealtimeAcknowledgement {
-        let matches = try withLock {
+        let byteCounts = try withLock { () -> (tracked: Int, stored: Int)? in
             guard let session = audioSession,
                   session.request.meetingID == meetingID,
-                  session.request.generation == generation else { return false }
+                  session.request.generation == generation else { return nil }
             try session.handle.synchronize()
-            return true
+            return (session.byteCount, Int(try session.handle.offset()))
+        }
+        let matches = byteCounts.map { $0.tracked == $0.stored } ?? false
+        let code: String? = if matches {
+            nil
+        } else if byteCounts == nil {
+            "AUDIO_BARRIER_NOT_OWNED"
+        } else {
+            "AUDIO_DELIVERY_INCOMPLETE"
         }
         return RealtimeAcknowledgement(
             success: matches,
-            code: matches ? nil : "AUDIO_BARRIER_NOT_OWNED",
+            code: code,
             meetingID: meetingID,
-            generation: generation
+            generation: generation,
+            audioByteCount: byteCounts?.stored
         )
     }
 

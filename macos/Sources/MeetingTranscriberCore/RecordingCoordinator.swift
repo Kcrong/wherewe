@@ -47,6 +47,8 @@ public enum RecordingCoordinatorError: Error, Equatable, LocalizedError, Sendabl
     case realtimeClientIDUnavailable
     case readyTimedOut
     case transcription(String?)
+    case audioDeliveryFailed
+    case audioDeliveryIncomplete
     case finalizationUnconfirmed
 
     public var errorDescription: String? {
@@ -60,6 +62,10 @@ public enum RecordingCoordinatorError: Error, Equatable, LocalizedError, Sendabl
         case let .transcription(code):
             if let code { return "Apple Speech transcription failed (\(code))." }
             return "Apple Speech transcription failed."
+        case .audioDeliveryFailed:
+            return "Audio delivery failed. Recording stopped before finalisation."
+        case .audioDeliveryIncomplete:
+            return "Not all captured audio reached the recording spool. Retry finalisation."
         case .finalizationUnconfirmed:
             return "Recording finalisation could not be confirmed. Retry finalisation before starting again."
         }
@@ -83,6 +89,11 @@ public actor RecordingCoordinator {
     private var readyContinuation: CheckedContinuation<ReadyForAudio, Error>?
     private var readyGeneration: Int64?
     private var framer: PCMFramer?
+    private var pendingAudioFrames: [Data] = []
+    private var expectedAudioByteCount = 0
+    private var deliveredAudioByteCount = 0
+    private var tracksAudioDelivery = false
+    private var audioDeliveryConfirmed = false
 
     public init(
         api: any NativeServiceServing,
@@ -107,6 +118,7 @@ public actor RecordingCoordinator {
 
     public func adoptRecoveryClaim(_ claim: RecordingClaim) throws {
         guard state == .idle else { throw RecordingCoordinatorError.invalidState }
+        clearAudioDeliveryTracking()
         state = .recoveryRequired(claim)
     }
 
@@ -159,6 +171,7 @@ public actor RecordingCoordinator {
                 sampleRate: Int(sampleRate.rounded()),
                 channelCount: channelCount
             )
+            beginAudioDeliveryTracking()
             state = .awaitingAudio(claim)
 
             let request = StartTranscriptionRequest(
@@ -178,7 +191,12 @@ public actor RecordingCoordinator {
         } catch {
             if case let .awaitingAudio(claim) = state {
                 let finalized = await finalizeClaim(claim)
-                state = finalized ? .idle : .recoveryRequired(claim)
+                if finalized {
+                    clearAudioDeliveryTracking()
+                    state = .idle
+                } else {
+                    state = .recoveryRequired(claim)
+                }
             } else if case .preparing = state {
                 state = .idle
             }
@@ -192,9 +210,9 @@ public actor RecordingCoordinator {
         }
         let frames = try framer.append(samples)
         self.framer = framer
-        for frame in frames {
-            try realtime.sendAudio(frame)
-        }
+        expectedAudioByteCount += samples.count * MemoryLayout<Int16>.size
+        pendingAudioFrames.append(contentsOf: frames)
+        try deliverPendingAudio()
     }
 
     @discardableResult
@@ -204,15 +222,12 @@ public actor RecordingCoordinator {
         }
         state = .stopping(claim)
 
-        if var framer, let residual = framer.flush() {
-            self.framer = framer
-            try? realtime.sendAudio(residual)
+        do {
+            try await confirmAudioDelivery(for: claim)
+        } catch {
+            state = .recoveryRequired(claim)
+            throw error
         }
-        let barrier = try? await realtime.audioBarrier(
-            meetingID: claim.meetingID,
-            generation: claim.generation
-        )
-        let audioDeliveryConfirmed = barrier?.success == true
 
         var usedServiceFallback = false
         let socketStop: RealtimeAcknowledgement
@@ -226,7 +241,9 @@ public actor RecordingCoordinator {
             throw error
         }
         var finalized = socketStop.success || socketStop.code == "RECORDING_CLAIM_STALE"
-        if !finalized, socketStop.code == "AUDIO_SESSION_UNAVAILABLE" {
+        if !finalized,
+           socketStop.code == "AUDIO_SESSION_UNAVAILABLE",
+           expectedAudioByteCount == 0 {
             usedServiceFallback = true
             finalized = await finalizeClaimViaService(claim)
         }
@@ -235,10 +252,10 @@ public actor RecordingCoordinator {
             state = .recoveryRequired(claim)
             throw RecordingCoordinatorError.finalizationUnconfirmed
         }
-        framer = nil
+        clearAudioDeliveryTracking()
         state = .idle
         return RecordingStopOutcome(
-            audioDeliveryConfirmed: audioDeliveryConfirmed,
+            audioDeliveryConfirmed: true,
             usedServiceFallback: usedServiceFallback
         )
     }
@@ -248,11 +265,20 @@ public actor RecordingCoordinator {
             throw RecordingCoordinatorError.invalidState
         }
         state = .retryingFinalization(claim)
-        guard await finalizeClaim(claim) else {
+        if tracksAudioDelivery, !audioDeliveryConfirmed {
+            do {
+                try await confirmAudioDelivery(for: claim)
+            } catch {
+                state = .recoveryRequired(claim)
+                throw error
+            }
+        }
+        let allowsServiceFallback = !tracksAudioDelivery || expectedAudioByteCount == 0
+        guard await finalizeClaim(claim, allowsServiceFallback: allowsServiceFallback) else {
             state = .recoveryRequired(claim)
             throw RecordingCoordinatorError.finalizationUnconfirmed
         }
-        framer = nil
+        clearAudioDeliveryTracking()
         state = .idle
     }
 
@@ -331,7 +357,58 @@ public actor RecordingCoordinator {
         readyContinuation = nil
     }
 
-    private func finalizeClaim(_ claim: RecordingClaim) async -> Bool {
+    private func beginAudioDeliveryTracking() {
+        pendingAudioFrames.removeAll(keepingCapacity: true)
+        expectedAudioByteCount = 0
+        deliveredAudioByteCount = 0
+        tracksAudioDelivery = true
+        audioDeliveryConfirmed = false
+    }
+
+    private func clearAudioDeliveryTracking() {
+        framer = nil
+        pendingAudioFrames.removeAll(keepingCapacity: false)
+        expectedAudioByteCount = 0
+        deliveredAudioByteCount = 0
+        tracksAudioDelivery = false
+        audioDeliveryConfirmed = false
+    }
+
+    private func deliverPendingAudio() throws {
+        while let frame = pendingAudioFrames.first {
+            do {
+                try realtime.sendAudio(frame)
+            } catch {
+                throw RecordingCoordinatorError.audioDeliveryFailed
+            }
+            pendingAudioFrames.removeFirst()
+            deliveredAudioByteCount += frame.count
+        }
+    }
+
+    private func confirmAudioDelivery(for claim: RecordingClaim) async throws {
+        if var framer, let residual = framer.flush() {
+            self.framer = framer
+            pendingAudioFrames.append(residual)
+        }
+        try deliverPendingAudio()
+        guard deliveredAudioByteCount == expectedAudioByteCount else {
+            throw RecordingCoordinatorError.audioDeliveryIncomplete
+        }
+        let barrier = try await realtime.audioBarrier(
+            meetingID: claim.meetingID,
+            generation: claim.generation
+        )
+        guard barrier.success, barrier.audioByteCount == expectedAudioByteCount else {
+            throw RecordingCoordinatorError.audioDeliveryIncomplete
+        }
+        audioDeliveryConfirmed = true
+    }
+
+    private func finalizeClaim(
+        _ claim: RecordingClaim,
+        allowsServiceFallback: Bool = true
+    ) async -> Bool {
         do {
             let acknowledgement = try await realtime.stopTranscription(
                 meetingID: claim.meetingID,
@@ -340,7 +417,8 @@ public actor RecordingCoordinator {
             if acknowledgement.success || acknowledgement.code == "RECORDING_CLAIM_STALE" {
                 return true
             }
-            guard acknowledgement.code == "AUDIO_SESSION_UNAVAILABLE" else { return false }
+            guard allowsServiceFallback,
+                  acknowledgement.code == "AUDIO_SESSION_UNAVAILABLE" else { return false }
             return await finalizeClaimViaService(claim)
         } catch {
             return false
