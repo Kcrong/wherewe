@@ -181,47 +181,153 @@ final class NativeDatabase {
     }
 
     private func migrate() throws {
-        try ensureColumn(table: "meetings", name: "mode", declaration: "TEXT NOT NULL DEFAULT 'meeting'")
-        try ensureColumn(table: "glossary", name: "meeting_id", declaration: "INTEGER REFERENCES meetings(id) ON DELETE CASCADE")
-        for (name, declaration) in [
-            ("alternatives", "TEXT"),
-            ("confidence", "REAL"),
-            ("transcription_engine", "TEXT"),
-            ("transcription_provider", "TEXT"),
-            ("transcription_model", "TEXT"),
-            ("transcription_mode", "TEXT"),
-            ("result_stage", "TEXT"),
-            ("translation_target", "TEXT"),
-            ("translation_provider", "TEXT"),
-            ("translation_source_hash", "TEXT"),
-            ("translation_source_version", "INTEGER NOT NULL DEFAULT 1"),
-            ("translation_status", "TEXT NOT NULL DEFAULT 'idle'"),
-            ("translation_error", "TEXT"),
-            ("translation_attempts", "INTEGER NOT NULL DEFAULT 0"),
-            ("translation_updated_at", "TEXT"),
-        ] {
-            try ensureColumn(table: "transcripts", name: name, declaration: declaration)
+        try execute("PRAGMA foreign_keys = OFF")
+        do {
+            try transaction {
+                try ensureColumn(table: "meetings", name: "mode", declaration: "TEXT NOT NULL DEFAULT 'meeting'")
+                try ensureColumn(table: "glossary", name: "meeting_id", declaration: "INTEGER REFERENCES meetings(id) ON DELETE CASCADE")
+                for (name, declaration) in [
+                    ("alternatives", "TEXT"),
+                    ("confidence", "REAL"),
+                    ("transcription_engine", "TEXT"),
+                    ("transcription_provider", "TEXT"),
+                    ("transcription_model", "TEXT"),
+                    ("transcription_mode", "TEXT"),
+                    ("result_stage", "TEXT"),
+                    ("translation_target", "TEXT"),
+                    ("translation_provider", "TEXT"),
+                    ("translation_source_hash", "TEXT"),
+                    ("translation_source_version", "INTEGER NOT NULL DEFAULT 1"),
+                    ("translation_status", "TEXT NOT NULL DEFAULT 'idle'"),
+                    ("translation_error", "TEXT"),
+                    ("translation_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                    ("translation_updated_at", "TEXT"),
+                ] {
+                    try ensureColumn(table: "transcripts", name: name, declaration: declaration)
+                }
+                for (name, declaration) in [
+                    ("translation_target", "TEXT"),
+                    ("translation_provider", "TEXT"),
+                    ("translation_source_hash", "TEXT"),
+                    ("translation_source_version", "INTEGER NOT NULL DEFAULT 1"),
+                    ("translation_status", "TEXT NOT NULL DEFAULT 'idle'"),
+                    ("translation_error", "TEXT"),
+                    ("translation_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                    ("translation_updated_at", "TEXT"),
+                ] {
+                    try ensureColumn(table: "transcript_segments", name: name, declaration: declaration)
+                }
+
+                try ensureForeignKey(
+                    table: "transcripts",
+                    fromColumn: "meeting_id",
+                    parentTable: "meetings",
+                    parentColumn: "id",
+                    onDelete: "CASCADE"
+                )
+                try execute("UPDATE meetings SET mode = 'meeting' WHERE mode IS NULL OR mode <> 'meeting'")
+                try execute("UPDATE transcripts SET translation_status = 'succeeded' WHERE translation IS NOT NULL AND translation_status = 'idle'")
+                try execute("UPDATE transcript_segments SET translation_status = 'succeeded' WHERE translation IS NOT NULL AND translation_status = 'idle'")
+                try execute("UPDATE transcripts SET translation_status = 'idle', translation_error = NULL WHERE translation_status = 'pending'")
+                try execute("UPDATE transcript_segments SET translation_status = 'idle', translation_error = NULL WHERE translation_status = 'pending'")
+
+                let violations = try query("PRAGMA foreign_key_check")
+                guard violations.isEmpty else {
+                    throw NativeSQLiteError.execute(
+                        "legacy migration found \(violations.count) foreign-key violation(s)"
+                    )
+                }
+            }
+            try execute("PRAGMA foreign_keys = ON")
+        } catch {
+            try? execute("PRAGMA foreign_keys = ON")
+            throw error
         }
-        for (name, declaration) in [
-            ("translation_target", "TEXT"),
-            ("translation_provider", "TEXT"),
-            ("translation_source_hash", "TEXT"),
-            ("translation_source_version", "INTEGER NOT NULL DEFAULT 1"),
-            ("translation_status", "TEXT NOT NULL DEFAULT 'idle'"),
-            ("translation_error", "TEXT"),
-            ("translation_attempts", "INTEGER NOT NULL DEFAULT 0"),
-            ("translation_updated_at", "TEXT"),
-        ] {
-            try ensureColumn(table: "transcript_segments", name: name, declaration: declaration)
+    }
+
+    private func ensureForeignKey(
+        table: String,
+        fromColumn: String,
+        parentTable: String,
+        parentColumn: String,
+        onDelete: String
+    ) throws {
+        let foreignKeys = try query("PRAGMA foreign_key_list(\(quotedIdentifier(table)))")
+        let hasExpectedForeignKey = foreignKeys.contains { row in
+            guard let referencedTable = row.string("table"),
+                  let sourceColumn = row.string("from"),
+                  let referencedColumn = row.string("to"),
+                  let deleteAction = row.string("on_delete") else {
+                return false
+            }
+            return referencedTable.caseInsensitiveCompare(parentTable) == .orderedSame
+                && sourceColumn.caseInsensitiveCompare(fromColumn) == .orderedSame
+                && referencedColumn.caseInsensitiveCompare(parentColumn) == .orderedSame
+                && deleteAction.caseInsensitiveCompare(onDelete) == .orderedSame
+        }
+        guard !hasExpectedForeignKey else { return }
+
+        try rebuildTable(
+            table,
+            addingConstraint: "FOREIGN KEY (\(quotedIdentifier(fromColumn))) "
+                + "REFERENCES \(quotedIdentifier(parentTable))(\(quotedIdentifier(parentColumn))) "
+                + "ON DELETE \(onDelete)"
+        )
+    }
+
+    private func rebuildTable(_ table: String, addingConstraint constraint: String) throws {
+        let temporaryTable = "__wherewe_migrate_\(table)"
+        guard try first(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?",
+            [.text(temporaryTable)]
+        ) == nil else {
+            throw NativeSQLiteError.execute("temporary migration table already exists")
+        }
+        guard let createSQL = try first(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+            [.text(table)]
+        )?.string("sql"),
+            let openingParenthesis = createSQL.firstIndex(of: "("),
+            let closingParenthesis = createSQL.lastIndex(of: ")"),
+            openingParenthesis < closingParenthesis else {
+            throw NativeSQLiteError.execute("unable to read legacy \(table) schema")
         }
 
-        try transaction {
-            try execute("UPDATE meetings SET mode = 'meeting' WHERE mode IS NULL OR mode <> 'meeting'")
-            try execute("UPDATE transcripts SET translation_status = 'succeeded' WHERE translation IS NOT NULL AND translation_status = 'idle'")
-            try execute("UPDATE transcript_segments SET translation_status = 'succeeded' WHERE translation IS NOT NULL AND translation_status = 'idle'")
-            try execute("UPDATE transcripts SET translation_status = 'idle', translation_error = NULL WHERE translation_status = 'pending'")
-            try execute("UPDATE transcript_segments SET translation_status = 'idle', translation_error = NULL WHERE translation_status = 'pending'")
+        let columns = try query("PRAGMA table_info(\(quotedIdentifier(table)))")
+            .compactMap { $0.string("name") }
+        guard !columns.isEmpty else {
+            throw NativeSQLiteError.execute("legacy \(table) table has no columns")
         }
+        let quotedColumns = columns.map(quotedIdentifier).joined(separator: ", ")
+        let schemaObjects = try query(
+            """
+            SELECT sql FROM sqlite_schema
+            WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
+            ORDER BY type, name
+            """,
+            [.text(table)]
+        ).compactMap { $0.string("sql") }
+
+        let definition = String(createSQL[openingParenthesis..<closingParenthesis])
+        let suffix = String(createSQL[closingParenthesis...])
+        try execute(
+            "CREATE TABLE \(quotedIdentifier(temporaryTable)) \(definition), \(constraint)\(suffix)"
+        )
+        try execute(
+            "INSERT INTO \(quotedIdentifier(temporaryTable)) (\(quotedColumns)) "
+                + "SELECT \(quotedColumns) FROM \(quotedIdentifier(table))"
+        )
+        try execute("DROP TABLE \(quotedIdentifier(table))")
+        try execute(
+            "ALTER TABLE \(quotedIdentifier(temporaryTable)) RENAME TO \(quotedIdentifier(table))"
+        )
+        for sql in schemaObjects {
+            try execute(sql)
+        }
+    }
+
+    private func quotedIdentifier(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
     private func ensureColumn(table: String, name: String, declaration: String) throws {

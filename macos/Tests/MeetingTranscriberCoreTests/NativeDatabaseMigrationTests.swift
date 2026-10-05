@@ -5,8 +5,8 @@ import Testing
 
 @Suite("Native database migration")
 struct NativeDatabaseMigrationTests {
-    @Test("legacy meeting mode normalizes without rewriting transcript history")
-    func additiveMigration() throws {
+    @Test("legacy migration restores transcript cascade without rewriting history")
+    func legacyMigrationRestoresTranscriptCascade() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("native-db-migration-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -93,5 +93,18 @@ struct NativeDatabaseMigrationTests {
         #expect(row.string("refinement_source_provider") == "historical-source-provider")
         #expect(try database.first("SELECT value FROM legacy_auxiliary WHERE id = 1")?.string("value") == "preserve")
         #expect(try database.first("SELECT COUNT(*) AS count FROM transcripts")?.int("count") == 1)
+
+        let foreignKeys = try database.query("PRAGMA foreign_key_list(transcripts)")
+        #expect(foreignKeys.contains { row in
+            row.string("table") == "meetings"
+                && row.string("from") == "meeting_id"
+                && row.string("to") == "id"
+                && row.string("on_delete") == "CASCADE"
+        })
+        #expect(try database.query("PRAGMA foreign_key_check").isEmpty)
+
+        _ = try database.run("DELETE FROM meetings WHERE id = 1")
+        #expect(try database.first("SELECT COUNT(*) AS count FROM transcripts")?.int("count") == 0)
+        #expect(try database.first("SELECT value FROM legacy_auxiliary WHERE id = 1")?.string("value") == "preserve")
     }
 }
