@@ -413,7 +413,20 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         let reader = try FileHandle(forReadingFrom: url)
         defer { try? reader.close() }
         try reader.seek(toOffset: UInt64(start))
-        return try reader.read(upToCount: end - start) ?? Data()
+        let expectedByteCount = end - start
+        var data = Data(capacity: expectedByteCount)
+        while data.count < expectedByteCount {
+            let remaining = expectedByteCount - data.count
+            guard let chunk = try reader.read(upToCount: remaining), !chunk.isEmpty else {
+                throw NativeServiceError.server(
+                    status: 500,
+                    code: "AUDIO_SPOOL_READ_FAILED",
+                    message: "Recording audio could not be read from temporary storage."
+                )
+            }
+            data.append(chunk)
+        }
+        return data
     }
 
     private func discard(_ session: AudioSession) {
