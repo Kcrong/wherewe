@@ -89,4 +89,19 @@ struct ModelsTests {
         #expect(meetings[0].createdAt == "2026-09-23 01:00:00")
         #expect(meetings[1].createdAt == nil)
     }
+
+    @Test("an earlier save cannot clear a newer transcript edit")
+    func earlierSaveCannotClearNewerTranscriptEdit() {
+        var operations = TranscriptEditOperationTracker()
+        let earlier = operations.begin()
+        let newer = operations.begin()
+
+        let earlierFinished = operations.finish(earlier)
+        #expect(!earlierFinished)
+        #expect(operations.activeID == newer)
+
+        let newerFinished = operations.finish(newer)
+        #expect(newerFinished)
+        #expect(operations.activeID == nil)
+    }
 }

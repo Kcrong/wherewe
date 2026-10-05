@@ -12,6 +12,30 @@ public struct SegmentEditResponse: Codable, Equatable, Sendable {
     public let segment: TranscriptSegment
 }
 
+package struct TranscriptEditOperationTracker: Equatable, Sendable {
+    package private(set) var activeID: UUID?
+
+    package init() {}
+
+    @discardableResult
+    package mutating func begin() -> UUID {
+        let id = UUID()
+        activeID = id
+        return id
+    }
+
+    @discardableResult
+    package mutating func finish(_ id: UUID) -> Bool {
+        guard activeID == id else { return false }
+        activeID = nil
+        return true
+    }
+
+    package mutating func cancel() {
+        activeID = nil
+    }
+}
+
 public struct TranslationTargetRequest: Codable, Equatable, Sendable {
     public let target: String
 

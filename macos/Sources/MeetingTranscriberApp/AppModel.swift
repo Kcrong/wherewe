@@ -148,6 +148,7 @@ final class AppModel: ObservableObject {
     private let coordinator: RecordingCoordinator
     private let capture: CoreAudioCaptureSession
     private var transcriptStore = TranscriptStore()
+    private var transcriptEditOperation = TranscriptEditOperationTracker()
 
     private var frameTask: Task<Void, Never>?
     private var realtimeEventTask: Task<Void, Never>?
@@ -531,6 +532,7 @@ final class AppModel: ObservableObject {
         editingTranscriptID = nil
         editingSegmentID = segment.id
         editingSegmentText = segment.text
+        transcriptEditOperation.begin()
     }
 
     func beginEditingTranscript(_ row: LiveTranscriptRow) {
@@ -538,16 +540,20 @@ final class AppModel: ObservableObject {
         editingSegmentID = nil
         editingTranscriptID = transcriptID
         editingSegmentText = row.text
+        transcriptEditOperation.begin()
     }
 
     func cancelEditingSegment() {
+        transcriptEditOperation.cancel()
         editingSegmentID = nil
         editingTranscriptID = nil
         editingSegmentText = ""
     }
 
     func saveSegmentEdit() async {
-        guard let meetingID = loadedSelectedMeetingID, !databaseTransitionInProgress else { return }
+        guard let meetingID = loadedSelectedMeetingID,
+              let editOperationID = transcriptEditOperation.activeID,
+              !databaseTransitionInProgress else { return }
         let text = editingSegmentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         do {
@@ -566,7 +572,11 @@ final class AppModel: ObservableObject {
             } else {
                 return
             }
-            cancelEditingSegment()
+            if transcriptEditOperation.finish(editOperationID) {
+                editingSegmentID = nil
+                editingTranscriptID = nil
+                editingSegmentText = ""
+            }
             await resyncTranscriptState()
         } catch {
             workspaceError = error.localizedDescription
@@ -1000,9 +1010,7 @@ final class AppModel: ObservableObject {
         transcriptItems = []
         transcriptAutoFollowByMeetingID = [:]
         transcriptSearchText = ""
-        editingSegmentID = nil
-        editingTranscriptID = nil
-        editingSegmentText = ""
+        cancelEditingSegment()
 
         documents = []
         documentPreview = nil
