@@ -19,6 +19,14 @@ const transcriptStore = fs.readFileSync(
   path.join(ROOT, "macos/Sources/MeetingTranscriberCore/TranscriptStore.swift"),
   "utf8"
 );
+const transcriptMutations = fs.readFileSync(
+  path.join(ROOT, "macos/Sources/MeetingTranscriberCore/TranscriptMutationModels.swift"),
+  "utf8"
+);
+const modelTests = fs.readFileSync(
+  path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/ModelsTests.swift"),
+  "utf8"
+);
 const preferenceTests = fs.readFileSync(
   path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/NativePreferencesTests.swift"),
   "utf8"
@@ -191,6 +199,12 @@ test("workspace contains only retained local tools", () => {
 });
 
 test("transcript search copy editing and translation retry remain", () => {
+  const saveStart = model.indexOf("func saveSegmentEdit() async {");
+  const saveEnd = model.indexOf("\n    func retryTranslation", saveStart);
+  assert.notEqual(saveStart, -1, "missing saveSegmentEdit");
+  assert.ok(saveEnd > saveStart, "missing saveSegmentEdit boundary");
+  const saveSegmentEdit = model.slice(saveStart, saveEnd);
+
   assert.match(view, /TextField\("Search transcript"/);
   assert.match(view, /Label\("Copy", systemImage: "doc\.on\.doc"\)/);
   assert.match(view, /Text\("Edited"\)\.tag\(NativePreferences\.TranscriptView\.edited\)/);
@@ -199,6 +213,20 @@ test("transcript search copy editing and translation retry remain", () => {
   assert.match(model, /api\.editTranscript\(/);
   assert.match(model, /api\.editSegment\(/);
   assert.match(model, /api\.retryTranslation\(/);
+  assert.match(model, /private var transcriptEditOperation = TranscriptEditOperationTracker\(\)/);
+  assert.equal((model.match(/transcriptEditOperation\.begin\(\)/g) || []).length, 2);
+  assert.match(
+    saveSegmentEdit,
+    /let editOperationID = transcriptEditOperation\.activeID[\s\S]*if transcriptEditOperation\.finish\(editOperationID\) \{\s*editingSegmentID = nil\s*editingTranscriptID = nil\s*editingSegmentText = ""\s*\}/
+  );
+  assert.match(
+    transcriptMutations,
+    /package struct TranscriptEditOperationTracker:[\s\S]*guard activeID == id else \{ return false \}[\s\S]*activeID = nil/
+  );
+  assert.match(
+    modelTests,
+    /an earlier save cannot clear a newer transcript edit[\s\S]*!operations\.finish\(earlier\)[\s\S]*operations\.activeID == newer/
+  );
 });
 
 test("meeting selection clears stale state and fences meeting mutations", () => {
