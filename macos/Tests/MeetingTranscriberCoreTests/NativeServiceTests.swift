@@ -833,30 +833,131 @@ struct NativeServiceTests {
         #expect(!transcript.contains("Middle raw"))
     }
 
-    @Test("long recording commits bounded chunks before stop")
+    @Test("long recording reclaims committed PCM while recording continues")
     func boundedRecordingChunks() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
+        let spoolWorkspace = try NativeSpoolWorkspace(
+            baseURL: fixture.root.appendingPathComponent("audio-spool", isDirectory: true)
+        )
+        defer { spoolWorkspace.close() }
+        let maximumSpoolBytes = 320_000
         let service = makeTestService(configuration: fixture.configuration)
         try await fixture.configure(service)
         let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Chunked recording"))
-        let realtime = NativeRealtimeClient(service: service)
+        let realtime = NativeRealtimeClient(
+            service: service,
+            spoolWorkspace: spoolWorkspace,
+            maximumSpoolBytes: maximumSpoolBytes
+        )
         let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
-        _ = try await coordinator.start(
+        let claim = try await coordinator.start(
             meetingID: meeting.id,
             language: "en-US",
             translationTarget: "ko",
             sampleRate: 8_000,
             channelCount: 1
         )
-        for _ in 0..<110 {
+        for _ in 0..<450 {
             try await coordinator.sendPCM([Int16](repeating: 1, count: 800))
             try await Task.sleep(for: .milliseconds(2))
         }
-        _ = try await coordinator.stop()
+
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(2)
+        while try await service.meeting(id: meeting.id).transcripts.count < 3, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        var spoolFiles = try FileManager.default.contentsOfDirectory(
+            at: spoolWorkspace.directory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ).filter { $0.pathExtension == "pcm" }
+        let spoolDeadline = clock.now + .seconds(2)
+        while spoolFiles.count != 1, clock.now < spoolDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+            spoolFiles = try FileManager.default.contentsOfDirectory(
+                at: spoolWorkspace.directory,
+                includingPropertiesForKeys: [.fileSizeKey]
+            ).filter { $0.pathExtension == "pcm" }
+        }
+        #expect(spoolFiles.count == 1)
+        let spoolFile = try #require(spoolFiles.first)
+        let spoolBytes = try #require(spoolFile.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let expectedAudioBytes = 450 * 800 * MemoryLayout<Int16>.size
+        #expect(spoolBytes <= maximumSpoolBytes)
+        #expect(spoolBytes < expectedAudioBytes)
+
+        let barrier = try await realtime.audioBarrier(
+            meetingID: meeting.id,
+            generation: claim.generation
+        )
+        #expect(barrier.success)
+        #expect(barrier.audioByteCount == expectedAudioBytes)
+        let outcome = try await coordinator.stop()
+        #expect(outcome.audioDeliveryConfirmed)
         let transcripts = try await service.meeting(id: meeting.id).transcripts
-        #expect(transcripts.count == 2)
-        #expect(Set(transcripts.compactMap(\.resultID)).count == 2)
+        #expect(transcripts.count >= 4)
+        #expect(Set(transcripts.compactMap(\.resultID)).count == transcripts.count)
+        await coordinator.close()
+    }
+
+    @Test("recording spool rejects audio and keeps delivery unconfirmed at its safety limit")
+    func recordingSpoolLimit() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let spoolWorkspace = try NativeSpoolWorkspace(
+            baseURL: fixture.root.appendingPathComponent("limited-audio-spool", isDirectory: true)
+        )
+        defer { spoolWorkspace.close() }
+        let maximumSpoolBytes = 1_024
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Limited recording"))
+        let realtime = NativeRealtimeClient(
+            service: service,
+            spoolWorkspace: spoolWorkspace,
+            maximumSpoolBytes: maximumSpoolBytes
+        )
+        let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
+        let claim = try await coordinator.start(
+            meetingID: meeting.id,
+            language: "en-US",
+            translationTarget: "ko",
+            sampleRate: 8_000,
+            channelCount: 1
+        )
+        let expectedFailure = NativeServiceError.server(
+            status: 507,
+            code: "AUDIO_SPOOL_LIMIT",
+            message: "Recording audio storage reached its safety limit. Stop and finish the recording before continuing."
+        )
+
+        for _ in 0..<2 {
+            await #expect(throws: RecordingCoordinatorError.audioDeliveryFailed) {
+                try await coordinator.sendPCM([Int16](repeating: 1, count: 800))
+            }
+        }
+        await #expect(throws: expectedFailure) {
+            _ = try await realtime.audioBarrier(
+                meetingID: meeting.id,
+                generation: claim.generation
+            )
+        }
+        let spoolFiles = try FileManager.default.contentsOfDirectory(
+            at: spoolWorkspace.directory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ).filter { $0.pathExtension == "pcm" }
+        #expect(spoolFiles.count == 1)
+        let spoolFile = try #require(spoolFiles.first)
+        #expect(try spoolFile.resourceValues(forKeys: [.fileSizeKey]).fileSize == 0)
+
+        await #expect(throws: RecordingCoordinatorError.audioDeliveryFailed) {
+            _ = try await coordinator.stop()
+        }
+        #expect(await coordinator.state == .recoveryRequired(claim))
+        let unfinished = try await service.meeting(id: meeting.id)
+        #expect(unfinished.endedAt == nil)
+        #expect(unfinished.transcripts.isEmpty)
         await coordinator.close()
     }
 
