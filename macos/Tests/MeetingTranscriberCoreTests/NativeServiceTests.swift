@@ -615,6 +615,65 @@ struct NativeServiceTests {
         await coordinator.close()
     }
 
+    @Test("editing middle transcript preserves display order")
+    func editedMiddleTranscriptDisplayOrder() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Ordered display"))
+        let transcriptIDs = try fixture.insertTranscripts(
+            meetingID: meeting.id,
+            texts: ["First raw", "Middle raw", "Last raw"]
+        )
+
+        _ = try await service.editTranscript(
+            meetingID: meeting.id,
+            transcriptID: transcriptIDs[1],
+            text: "Edited middle"
+        )
+        let store = TranscriptStore()
+        _ = await store.activate(try await service.meeting(id: meeting.id))
+        let visibleText = await store.visibleItems(view: .edited).map { item in
+            switch item {
+            case let .segment(segment): segment.text
+            case let .transcript(row): row.text
+            case let .partial(row): row.text
+            }
+        }
+
+        #expect(visibleText == ["First raw", "Edited middle", "Last raw"])
+    }
+
+    @Test("editing middle transcript preserves export order")
+    func editedMiddleTranscriptExportOrder() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Ordered export"))
+        let transcriptIDs = try fixture.insertTranscripts(
+            meetingID: meeting.id,
+            texts: ["First raw", "Middle raw", "Last raw"]
+        )
+
+        _ = try await service.editTranscript(
+            meetingID: meeting.id,
+            transcriptID: transcriptIDs[1],
+            text: "Edited middle"
+        )
+        let exported = try await service.exportMeeting(id: meeting.id)
+        let transcriptURL = URL(fileURLWithPath: exported.path).appendingPathComponent("transcript.md")
+        let transcript = try String(contentsOf: transcriptURL, encoding: .utf8)
+        let first = try #require(transcript.range(of: "First raw"))
+        let middle = try #require(transcript.range(of: "Edited middle"))
+        let last = try #require(transcript.range(of: "Last raw"))
+
+        #expect(first.lowerBound < middle.lowerBound)
+        #expect(middle.lowerBound < last.lowerBound)
+        #expect(!transcript.contains("Middle raw"))
+    }
+
     @Test("long recording commits bounded chunks before stop")
     func boundedRecordingChunks() async throws {
         let fixture = try Fixture()
@@ -698,6 +757,23 @@ private struct Fixture {
 
     var databaseURL: URL { root.appendingPathComponent("data/meetings.db") }
     var filesURL: URL { root.appendingPathComponent("data/files", isDirectory: true) }
+
+    func insertTranscripts(meetingID: Int, texts: [String]) throws -> [Int] {
+        let database = try NativeDatabase(url: databaseURL)
+        return try texts.enumerated().map { index, text in
+            let timestamp = String(format: "2026-10-05T07:00:%02dZ", index)
+            return try database.run(
+                """
+                INSERT INTO transcripts (meeting_id, result_id, text, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    .integer(Int64(meetingID)), .text("ordered-\(index)"),
+                    .text(text), .text(timestamp),
+                ]
+            ).lastInsertID
+        }
+    }
 
     func databaseCompanionURL(_ suffix: String) -> URL {
         URL(fileURLWithPath: databaseURL.path + suffix)

@@ -260,3 +260,73 @@ public struct LiveTranscriptRow: Equatable, Identifiable, Sendable {
     public let translationAttempts: Int
     public let translationUpdatedAt: String?
 }
+
+struct TranscriptTimelineKey: Comparable, Sendable {
+    private let position: Double
+    private let kind: Int
+    private let stableID: Int
+
+    static func transcript(id: Int?, fallbackIndex: Int) -> TranscriptTimelineKey {
+        TranscriptTimelineKey(
+            position: id.map(Double.init) ?? .greatestFiniteMagnitude,
+            kind: 1,
+            stableID: id ?? fallbackIndex
+        )
+    }
+
+    static func segment(orderIndex: Double, id: Int) -> TranscriptTimelineKey {
+        TranscriptTimelineKey(
+            position: orderIndex.isFinite ? orderIndex : .greatestFiniteMagnitude,
+            kind: 0,
+            stableID: id
+        )
+    }
+
+    static func < (left: TranscriptTimelineKey, right: TranscriptTimelineKey) -> Bool {
+        if left.position != right.position { return left.position < right.position }
+        if left.kind != right.kind { return left.kind < right.kind }
+        return left.stableID < right.stableID
+    }
+}
+
+enum TranscriptTimelineEntry<Transcript, Segment> {
+    case transcript(Transcript)
+    case segment(Segment)
+}
+
+enum TranscriptTimeline {
+    static func merged<Transcript, Segment>(
+        transcripts: [Transcript],
+        segments: [Segment],
+        transcriptID: (Transcript) -> Int?,
+        segmentOrderIndex: (Segment) -> Double,
+        segmentID: (Segment) -> Int
+    ) -> [TranscriptTimelineEntry<Transcript, Segment>] {
+        typealias OrderedEntry = (
+            key: TranscriptTimelineKey,
+            sequence: Int,
+            entry: TranscriptTimelineEntry<Transcript, Segment>
+        )
+        let transcriptEntries: [OrderedEntry] = transcripts.enumerated().map { index, transcript in
+            (
+                TranscriptTimelineKey.transcript(id: transcriptID(transcript), fallbackIndex: index),
+                index,
+                .transcript(transcript)
+            )
+        }
+        let segmentEntries: [OrderedEntry] = segments.enumerated().map { index, segment in
+            (
+                TranscriptTimelineKey.segment(
+                    orderIndex: segmentOrderIndex(segment),
+                    id: segmentID(segment)
+                ),
+                transcripts.count + index,
+                .segment(segment)
+            )
+        }
+        return (transcriptEntries + segmentEntries).sorted { left, right in
+            if left.key != right.key { return left.key < right.key }
+            return left.sequence < right.sequence
+        }.map { $0.entry }
+    }
+}

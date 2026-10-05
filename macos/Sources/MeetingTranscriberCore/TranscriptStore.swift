@@ -137,8 +137,20 @@ public actor TranscriptStore {
         var items: [VisibleTranscriptItem] = []
         if view == .edited, !segments.isEmpty {
             let covered = Set(segments.flatMap(\.sourceIDs))
-            items.append(contentsOf: segments.map(VisibleTranscriptItem.segment))
-            items.append(contentsOf: finalRows.filter { !covered.contains($0.resultID) }.map(VisibleTranscriptItem.transcript))
+            let rawRows = finalRows.filter { !covered.contains($0.resultID) }
+            let timeline = TranscriptTimeline.merged(
+                transcripts: rawRows,
+                segments: segments,
+                transcriptID: { $0.databaseID },
+                segmentOrderIndex: { $0.orderIndex },
+                segmentID: { $0.id }
+            )
+            items.append(contentsOf: timeline.map { entry in
+                switch entry {
+                case let .transcript(row): .transcript(row)
+                case let .segment(segment): .segment(segment)
+                }
+            })
         } else {
             items.append(contentsOf: finalRows.map(VisibleTranscriptItem.transcript))
         }
