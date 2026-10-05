@@ -507,18 +507,30 @@ struct NativeServiceTests {
             displayAs: "release gate",
             language: "en"
         ))
+        let unrelatedTerm = try await service.createGlossary(GlossaryMutationRequest(
+            phrase: "出荷判定",
+            displayAs: nil,
+            language: "ja"
+        ))
         #expect(try await service.glossary(language: "en").map(\.id) == [term.id])
 
         let exported = try await service.exportMeeting(id: meeting.id)
         let root = URL(fileURLWithPath: exported.path, isDirectory: true)
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("meeting.json").path))
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("transcript.md").path))
-        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("background/context.md").path))
+        let backgroundURL = root.appendingPathComponent("background/context.md")
+        #expect(FileManager.default.fileExists(atPath: backgroundURL.path))
+        let background = String(decoding: try Data(contentsOf: backgroundURL), as: UTF8.self)
+        #expect(background.contains("## Glossary"))
+        #expect(background.contains("**release gate** → release gate _[en]_"))
+        #expect(!background.contains("出荷判定"))
+        #expect(exported.counts.glossary == 1)
         #expect(exported.files.attachments == ["background/files/검토.txt"])
         #expect(try await service.reveal(path: exported.path).success)
 
         #expect(try await service.deleteDocument(id: upload.id).success)
         #expect(try await service.deleteGlossary(id: term.id).success)
+        #expect(try await service.deleteGlossary(id: unrelatedTerm.id).success)
     }
 
     @Test("recording persists Apple transcription and translation metadata")
