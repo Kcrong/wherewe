@@ -158,6 +158,8 @@ test("release is tag-bound and publishes a draft with commit-message notes and a
   const firstSecret = release.indexOf("${{ secrets.");
   assert.ok(validationIndex >= 0 && validationIndex < gateIndex && gateIndex < firstSecret);
   const validationStep = namedStep(release, "Validate release tag before repository scripts");
+  assert.match(validationStep, /git checkout --detach "\$TAG_COMMIT"/);
+  assert.match(validationStep, /git rev-parse --verify HEAD/);
   assert.match(validationStep, /git merge-base --is-ancestor "\$TAG_COMMIT" origin\/main/);
   assert.match(validationStep, /current origin\/main history/);
 
@@ -168,6 +170,18 @@ test("release is tag-bound and publishes a draft with commit-message notes and a
   assert.match(releaseNotes, /git log --reverse --format=/);
 
   const releaseStep = namedStep(release, "Create draft GitHub Release");
+  const remoteTagLookupIndex = releaseStep.indexOf("git ls-remote --exit-code origin");
+  const remoteTagComparisonIndex = releaseStep.indexOf('[[ "$REMOTE_TAG_COMMIT" == "$TAG_COMMIT" ]]');
+  const releaseCreationIndex = releaseStep.indexOf("gh release create");
+  assert.ok(remoteTagLookupIndex >= 0 && remoteTagLookupIndex < remoteTagComparisonIndex);
+  assert.ok(remoteTagComparisonIndex < releaseCreationIndex);
+  assert.match(releaseStep, /refs\/tags\/\$RELEASE_TAG\^\{\}/);
+  assert.match(releaseStep, /peeled != "" \? peeled : direct/);
+  assert.match(releaseStep, /git rev-parse --verify HEAD/);
+  assert.match(
+    releaseStep,
+    /moved after validation; refusing to publish mismatched assets\." >&2\n\s+exit 1\n\s+\}\n\s+gh release create/,
+  );
   assert.match(releaseStep, /gh release create/);
   assert.match(releaseStep, /--verify-tag/);
   assert.match(releaseStep, /--notes-file "\$RELEASE_NOTES_PATH"/);
