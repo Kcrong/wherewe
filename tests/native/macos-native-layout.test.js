@@ -80,6 +80,81 @@ test("Command-comma opens one system Settings window with current app state", ()
   assert.doesNotMatch(model, /showingSettings|func openSettings\(|api\.transcriptionCatalogue\(\)/);
 });
 
+test("database changes clear and reload application state before mutations resume", () => {
+  const rootView = swiftView("RootView", "SettingsView");
+  const saveStart = model.indexOf("func saveSettings() async -> Bool {");
+  const clearStart = model.indexOf("private func clearDatabaseBackedState()");
+  const reloadStart = model.indexOf("private func reloadDatabaseBackedState() async");
+  const refreshAudioStart = model.indexOf("func refreshAudioDevices()", reloadStart);
+
+  assert.notEqual(saveStart, -1, "missing saveSettings");
+  assert.ok(clearStart > saveStart, "missing database state reset");
+  assert.ok(reloadStart > clearStart, "missing database state reload");
+  assert.ok(refreshAudioStart > reloadStart, "missing database reload boundary");
+
+  const saveSettings = model.slice(saveStart, clearStart);
+  const clearState = model.slice(clearStart, reloadStart);
+  const reloadState = model.slice(reloadStart, refreshAudioStart);
+  const transitionStart = saveSettings.indexOf("databaseTransitionInProgress = switchesDatabase");
+  const clearCall = saveSettings.indexOf("if switchesDatabase { clearDatabaseBackedState() }");
+  const databaseUpdate = saveSettings.indexOf("api.updateSettings(draft, etag: settingsETag)");
+  const reloadCall = saveSettings.indexOf("await reloadDatabaseBackedState()", databaseUpdate);
+
+  assert.match(model, /@Published private\(set\) var databaseTransitionInProgress = false/);
+  assert.match(rootView, /\.disabled\(model\.databaseTransitionInProgress\)/);
+  assert.match(saveSettings, /let switchesDatabase = settingsDocument\?\.paths\.database != draft\.paths\.database/);
+  assert.match(
+    saveSettings,
+    /switchesDatabase,[\s\S]{0,180}meetingMutationInProgress \|\| fileOperationInProgress \|\| glossaryOperationInProgress/
+  );
+  assert.match(
+    saveSettings,
+    /defer \{\s*databaseTransitionInProgress = false\s*settingsInProgress = false\s*\}/
+  );
+  assert.ok(transitionStart >= 0 && transitionStart < clearCall);
+  assert.ok(clearCall < databaseUpdate);
+  assert.ok(databaseUpdate < reloadCall);
+
+  assert.match(clearState, /meetingLoadGeneration \+= 1/);
+  assert.match(clearState, /meetings = \[\][\s\S]*selectedMeetingID = nil[\s\S]*meetingDetail = nil/);
+  assert.match(clearState, /meetingTitleDraft = ""[\s\S]*meetingContextDraft = ""/);
+  assert.match(clearState, /transcriptStore = TranscriptStore\(\)[\s\S]*transcriptItems = \[\]/);
+  assert.match(clearState, /documents = \[\][\s\S]*globalGlossary = \[\][\s\S]*meetingGlossary = \[\]/);
+  assert.match(
+    reloadState,
+    /meetings = try await api\.meetings\(\)[\s\S]*selectedMeetingID = meetings\.first\?\.id[\s\S]*await loadSelectedMeeting\(\)/
+  );
+  assert.match(model, /var canStartRecording:[\s\S]{0,220}!databaseTransitionInProgress/);
+  assert.match(model, /func selectMeeting[\s\S]{0,140}!databaseTransitionInProgress/);
+  assert.match(model, /func refreshMeetings[\s\S]{0,140}!databaseTransitionInProgress/);
+
+  const guardedMutations = [
+    "startRecordingWithoutMeeting",
+    "createMeeting",
+    "saveMeetingDetails",
+    "deleteSelectedMeeting",
+    "changeTranslationTarget",
+    "saveSegmentEdit",
+    "retryTranslation",
+    "uploadDocuments",
+    "deleteDocument",
+    "addGlossaryEntry",
+    "saveGlossaryEdit",
+    "deleteGlossaryEntry",
+  ];
+  for (const functionName of guardedMutations) {
+    const start = model.indexOf(`func ${functionName}(`);
+    const end = model.indexOf("\n    func ", start + 1);
+    assert.notEqual(start, -1, `missing ${functionName}`);
+    assert.ok(end > start, `missing boundary after ${functionName}`);
+    assert.match(
+      model.slice(start, end),
+      /!databaseTransitionInProgress/,
+      `${functionName} must reject database mutations during a transition`
+    );
+  }
+});
+
 test("meeting and CoreAudio recording controls remain available", () => {
   assert.match(view, /TextField\("Search meetings"/);
   assert.match(view, /Label\("New Meeting", systemImage: "plus"\)/);

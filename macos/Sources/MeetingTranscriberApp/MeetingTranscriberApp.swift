@@ -155,6 +155,7 @@ private struct RootView: View {
             NewMeetingView(model: model)
         }
         .preferredColorScheme(model.theme.colorScheme)
+        .disabled(model.databaseTransitionInProgress)
         .onChange(of: model.phase) { _, phase in
             if phase == .setupRequired {
                 openSettings()
