@@ -31,10 +31,6 @@ const preferenceTests = fs.readFileSync(
   path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/NativePreferencesTests.swift"),
   "utf8"
 );
-const modelTests = fs.readFileSync(
-  path.join(ROOT, "macos/Tests/MeetingTranscriberCoreTests/ModelsTests.swift"),
-  "utf8"
-);
 const coreModels = fs.readFileSync(
   path.join(ROOT, "macos/Sources/MeetingTranscriberCore/Models.swift"),
   "utf8"
