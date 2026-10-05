@@ -29,7 +29,13 @@ final class NativeSettingsStore {
         return SettingsEnvelope(document: document, etag: try etag(for: request))
     }
 
-    func importData(_ data: Data, etag: String?) throws -> SettingsEnvelope {
+    struct PreparedUpdate {
+        fileprivate let request: SettingsUpdateRequest
+        fileprivate let etag: String?
+        let document: SettingsDocument
+    }
+
+    func prepareImport(_ data: Data, etag: String?) throws -> PreparedUpdate {
         guard data.count <= 256 * 1_024 else { throw NativeServiceError.encoding }
         let request: SettingsUpdateRequest
         if let decoded = try? decoder.decode(SettingsUpdateRequest.self, from: data) {
@@ -39,27 +45,16 @@ final class NativeSettingsStore {
         } else {
             throw NativeServiceError.server(status: 400, code: "SETTINGS_INVALID", message: "The settings file is not valid.")
         }
-        return try update(request, etag: etag)
+        return try prepareUpdate(request, etag: etag)
     }
 
-    func update(_ submitted: SettingsUpdateRequest, etag: String?) throws -> SettingsEnvelope {
+    func prepareUpdate(_ submitted: SettingsUpdateRequest, etag: String?) throws -> PreparedUpdate {
         var request = normalized(submitted)
         request.paths = try NativeStoragePathPolicy.canonicalize(request.paths)
         try validate(request)
-        if isConfigured {
-            let current = try envelope()
-            guard let etag, etag == current.etag else {
-                throw NativeServiceError.server(
-                    status: 412,
-                    code: "SETTINGS_REVISION_CONFLICT",
-                    message: "Settings changed since they were opened. Reload and try again."
-                )
-            }
-        } else if etag != nil {
-            throw NativeServiceError.server(status: 412, code: "SETTINGS_REVISION_CONFLICT", message: nil)
-        }
+        try validateRevision(etag)
 
-        let directory = try NativeStoragePathPolicy.secureDirectory(
+        _ = try NativeStoragePathPolicy.secureDirectory(
             configuration.configURL.deletingLastPathComponent(),
             fileManager: fileManager
         )
@@ -72,7 +67,24 @@ final class NativeSettingsStore {
             fileManager: fileManager
         )
 
-        let data = try encoder.encode(request)
+        return PreparedUpdate(
+            request: request,
+            etag: etag,
+            document: document(for: request, configured: true)
+        )
+    }
+
+    func update(_ submitted: SettingsUpdateRequest, etag: String?) throws -> SettingsEnvelope {
+        try commit(prepareUpdate(submitted, etag: etag))
+    }
+
+    func commit(_ prepared: PreparedUpdate) throws -> SettingsEnvelope {
+        try validateRevision(prepared.etag)
+        let directory = try NativeStoragePathPolicy.secureDirectory(
+            configuration.configURL.deletingLastPathComponent(),
+            fileManager: fileManager
+        )
+        let data = try encoder.encode(prepared.request)
         let temporary = directory.appendingPathComponent(".\(configuration.configURL.lastPathComponent).\(UUID().uuidString).tmp")
         do {
             try data.write(to: temporary, options: [.atomic])
@@ -117,6 +129,21 @@ final class NativeSettingsStore {
             throw error
         } catch {
             throw NativeServiceError.server(status: 500, code: "SETTINGS_UNAVAILABLE", message: "The settings file is unavailable.")
+        }
+    }
+
+    private func validateRevision(_ etag: String?) throws {
+        if isConfigured {
+            let current = try envelope()
+            guard let etag, etag == current.etag else {
+                throw NativeServiceError.server(
+                    status: 412,
+                    code: "SETTINGS_REVISION_CONFLICT",
+                    message: "Settings changed since they were opened. Reload and try again."
+                )
+            }
+        } else if etag != nil {
+            throw NativeServiceError.server(status: 412, code: "SETTINGS_REVISION_CONFLICT", message: nil)
         }
     }
 

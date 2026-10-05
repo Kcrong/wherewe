@@ -33,8 +33,9 @@ test("recording ownership is revalidated after every persistence suspension", ()
   assert.match(start, /speechPreparation\(language: request\.language\)[\s\S]*guard databaseStorage === initialDatabase[\s\S]*RECORDING_CONTEXT_CHANGED/);
   assert.match(start, /let update = try initialDatabase\.run[\s\S]*guard update\.changes == 1[\s\S]*recordingGeneration = nextGeneration[\s\S]*recordingClaim = claim/);
   assert.match(service, /var speechAssetPreparationLanguage: String\?[\s\S]*var recordingStartLanguages: \[UUID: String\]/);
-  assert.match(settings, /importSettings\([\s\S]*recordingClaim == nil, recordingStartLanguages\.isEmpty[\s\S]*settingsStore\.importData/);
-  assert.match(settings, /updateSettings\([\s\S]*guard recordingStartLanguages\.isEmpty[\s\S]*settingsStore\.update/);
+  assert.match(settings, /importSettings\([\s\S]*recordingClaim == nil, recordingStartLanguages\.isEmpty[\s\S]*settingsStore\.prepareImport/);
+  assert.match(settings, /updateSettings\([\s\S]*guard recordingStartLanguages\.isEmpty[\s\S]*settingsStore\.prepareUpdate/);
+  assert.match(settings, /private func activateSettings\([\s\S]*let candidate = try NativeDatabase\([\s\S]*settingsStore\.commit\(prepared\)[\s\S]*databaseStorage = candidate/);
   assert.match(settings, /recordingClaim == nil[\s\S]*recordingStartLanguages\.isEmpty[\s\S]*speechAssetPreparationLanguage == nil[\s\S]*speechAssetPreparationLanguage = language[\s\S]*defer \{ speechAssetPreparationLanguage = nil \}[\s\S]*speechService\.prepare/);
   assert.match(recording, /func requireCurrentRecordingClaim\([\s\S]*claim\.language == request\.language[\s\S]*claim\.translationTarget == canonicalLanguage\(request\.translationTarget\)/);
   assert.match(commit, /await transcribe\([\s\S]*requireCurrentRecordingClaim\(/);
