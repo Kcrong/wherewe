@@ -291,6 +291,10 @@ test("meeting selection clears stale state and fences meeting mutations", () => 
   assert.match(rootView, /ProgressView\("Loading meeting…"\)/);
   assert.match(rootView, /title: "Meeting Unavailable"[\s\S]{0,300}await model\.loadSelectedMeeting\(\)/);
   assert.match(modelTests, /meeting selection admits mutations only after the matching load/);
+  assert.doesNotMatch(
+    modelTests,
+    /#expect\([^\n]*selection\.(?:select|beginLoading|finishLoading)\(/
+  );
 });
 
 test("live transcript follows the bottom until the user scrolls away", () => {

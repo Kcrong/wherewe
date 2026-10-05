@@ -55,21 +55,28 @@ struct ModelsTests {
     func meetingSelectionRequiresMatchingLoad() {
         var selection = MeetingSelectionState()
 
-        #expect(selection.select(11))
-        #expect(selection.beginLoading() == 11)
+        let selectedFirst = selection.select(11)
+        #expect(selectedFirst)
+        let loadingFirst = selection.beginLoading()
+        #expect(loadingFirst == 11)
         #expect(selection.mutationID == nil)
-        #expect(selection.finishLoading(11))
+        let loadedFirst = selection.finishLoading(11)
+        #expect(loadedFirst)
         #expect(selection.mutationID == 11)
 
-        #expect(selection.select(22))
+        let selectedSecond = selection.select(22)
+        #expect(selectedSecond)
         #expect(selection.loadedID == nil)
         #expect(selection.mutationID == nil)
-        #expect(!selection.finishLoading(11))
+        let acceptedStaleLoad = selection.finishLoading(11)
+        #expect(!acceptedStaleLoad)
         #expect(selection.mutationID == nil)
-        #expect(selection.finishLoading(22))
+        let loadedSecond = selection.finishLoading(22)
+        #expect(loadedSecond)
         #expect(selection.mutationID == 22)
 
-        #expect(!selection.select(22))
+        let reselectedSecond = selection.select(22)
+        #expect(!reselectedSecond)
         #expect(selection.mutationID == 22)
     }
 
