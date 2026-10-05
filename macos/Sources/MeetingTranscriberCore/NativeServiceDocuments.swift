@@ -103,9 +103,23 @@ extension NativeService {
             operation: .delete,
             fileManager: fileManager
         )
-        try? fileManager.removeItem(at: url)
+        try removeStoredDocumentFile(at: url)
         _ = try database.run("DELETE FROM documents WHERE id = ?", [.integer(Int64(id))])
         return SuccessResponse(success: true)
+    }
+
+    func removeStoredDocumentFile(at url: URL) throws {
+        do {
+            try fileManager.removeItem(at: url)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            return
+        } catch {
+            throw NativeServiceError.server(
+                status: 500,
+                code: "FILE_DELETE_FAILED",
+                message: "The attachment file could not be deleted. The record was kept; check file permissions and try again."
+            )
+        }
     }
 
     public func glossary(language: String) async throws -> [GlossaryEntry] {

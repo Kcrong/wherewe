@@ -106,7 +106,7 @@ extension NativeService {
         }
         let database = try requireDatabase()
         let files = try database.query(
-            "SELECT file_path FROM documents WHERE meeting_id = ?",
+            "SELECT file_path FROM documents WHERE meeting_id = ? ORDER BY id ASC",
             [.integer(Int64(id))]
         ).compactMap { $0.string("file_path") }
         let settings = try settingsStore.envelope().document
@@ -119,11 +119,13 @@ extension NativeService {
                 fileManager: fileManager
             )
         }
+        for url in safeFiles {
+            try removeStoredDocumentFile(at: url)
+        }
         let result = try database.run("DELETE FROM meetings WHERE id = ?", [.integer(Int64(id))])
         guard result.changes == 1 else {
             throw NativeServiceError.server(status: 404, code: "MEETING_NOT_FOUND", message: nil)
         }
-        for url in safeFiles { try? fileManager.removeItem(at: url) }
         if activeMeetingID == id { activeMeetingID = nil }
         return SuccessResponse(success: true)
     }

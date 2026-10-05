@@ -97,6 +97,102 @@ struct AttachmentPathSecurityTests {
         #expect(FileManager.default.fileExists(atPath: outside.appendingPathComponent("sentinel.txt").path))
         #expect(try await service.documents(meetingID: meeting.id).map(\.id) == [documentID])
     }
+
+    @Test("document deletion reports file removal failure and can be retried")
+    func documentDeletionFailurePreservesRecord() async throws {
+        let fixture = try AttachmentSecurityFixture()
+        defer { fixture.remove() }
+        let documentURL = fixture.filesRoot.appendingPathComponent("blocked-document.txt")
+        let service = NativeService(
+            configuration: fixture.configuration,
+            fileManager: OneShotRemovalFailingFileManager(failingAt: documentURL)
+        )
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Retry document delete"))
+        try Data("must remain available".utf8).write(to: documentURL)
+        let documentID = try await service.insertDocumentForSecurityTest(
+            meetingID: meeting.id,
+            name: "blocked-document.txt",
+            format: "txt",
+            path: documentURL.path
+        )
+
+        await #expect(throws: NativeServiceError.server(
+            status: 500,
+            code: "FILE_DELETE_FAILED",
+            message: "The attachment file could not be deleted. The record was kept; check file permissions and try again."
+        )) {
+            _ = try await service.deleteDocument(id: documentID)
+        }
+        #expect(FileManager.default.fileExists(atPath: documentURL.path))
+        #expect(try await service.documents(meetingID: meeting.id).map(\.id) == [documentID])
+
+        #expect(try await service.deleteDocument(id: documentID).success)
+        #expect(!FileManager.default.fileExists(atPath: documentURL.path))
+        #expect(try await service.documents(meetingID: meeting.id).isEmpty)
+    }
+
+    @Test("meeting delete retries after an attachment failure")
+    func meetingDeletionFailurePreservesStateForRetry() async throws {
+        let fixture = try AttachmentSecurityFixture()
+        defer { fixture.remove() }
+        let firstURL = fixture.filesRoot.appendingPathComponent("first-document.txt")
+        let blockedURL = fixture.filesRoot.appendingPathComponent("blocked-document.txt")
+        let service = NativeService(
+            configuration: fixture.configuration,
+            fileManager: OneShotRemovalFailingFileManager(failingAt: blockedURL)
+        )
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Retry meeting delete"))
+        try Data("first file".utf8).write(to: firstURL)
+        try Data("blocked file".utf8).write(to: blockedURL)
+        let firstID = try await service.insertDocumentForSecurityTest(
+            meetingID: meeting.id,
+            name: "first-document.txt",
+            format: "txt",
+            path: firstURL.path
+        )
+        let blockedID = try await service.insertDocumentForSecurityTest(
+            meetingID: meeting.id,
+            name: "blocked-document.txt",
+            format: "txt",
+            path: blockedURL.path
+        )
+
+        await #expect(throws: NativeServiceError.server(
+            status: 500,
+            code: "FILE_DELETE_FAILED",
+            message: "The attachment file could not be deleted. The record was kept; check file permissions and try again."
+        )) {
+            _ = try await service.deleteMeeting(id: meeting.id, socketID: nil)
+        }
+        #expect(!FileManager.default.fileExists(atPath: firstURL.path))
+        #expect(FileManager.default.fileExists(atPath: blockedURL.path))
+        #expect(try await service.meeting(id: meeting.id).id == meeting.id)
+        #expect(try await service.documents(meetingID: meeting.id).map(\.id) == [firstID, blockedID])
+
+        #expect(try await service.deleteMeeting(id: meeting.id, socketID: nil).success)
+        #expect(!FileManager.default.fileExists(atPath: blockedURL.path))
+        #expect(try await service.meetings().allSatisfy { $0.id != meeting.id })
+    }
+}
+
+private final class OneShotRemovalFailingFileManager: FileManager {
+    private let failedRemovalPath: String
+    private var hasFailed = false
+
+    init(failingAt url: URL) {
+        failedRemovalPath = url.standardizedFileURL.path
+        super.init()
+    }
+
+    override func removeItem(at url: URL) throws {
+        if !hasFailed, url.standardizedFileURL.path == failedRemovalPath {
+            hasFailed = true
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        try super.removeItem(at: url)
+    }
 }
 
 private extension NativeService {

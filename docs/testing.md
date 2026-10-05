@@ -5,8 +5,8 @@ proves. Source inventories are checked by `testing-strategy.test.js`.
 
 ## Current inventory
 
-- Swift test sources: 26 files, 23 suites, 77 declared tests.
-- Deterministic Swift baseline: 72 tests.
+- Swift test sources: 26 files, 23 suites, 79 declared tests.
+- Deterministic Swift baseline: 74 tests.
 - Opt-in Swift runtime and hardware checks: 5 tests across 3 environment keys.
 - Node source contracts: 13 files, 59 declared tests.
 - `MeetingTranscriberCoreChecks` is a separate executable smoke contract.
@@ -19,7 +19,7 @@ Node contracts, public-content scanner, JSON checks, and shell syntax checks.
 
 | Source | Scope |
 | --- | --- |
-| `AttachmentPathSecurityTests.swift` | Stored attachment containment and safe deletion |
+| `AttachmentPathSecurityTests.swift` | Stored attachment containment, deletion failures, and retry recovery |
 | `CaptureLevelMeterTests.swift` | Level mapping, cadence, and channel isolation |
 | `CaptureRegressionTests.swift` | Commit boundaries, input policy, deadlines, and spool ownership |
 | `CoreAudioInputPlanningTests.swift` | Microphone and system-input planning |
@@ -128,7 +128,7 @@ exits successfully.
 | Meeting and SQLite behavior | Service, migration, mutation, translation, and core-check suites | Execute on supported macOS hardware |
 | CoreAudio and realtime ownership | Deterministic framing/synchronization suites and generation fencing | Hardware, TCC, route changes, unplug, and sleep/wake remain manual |
 | Apple Speech and Translation | Advisory hosted probes plus required local generated-speech and installed-pack evidence | Test each draft-release DMG with installed assets on a real Mac before publishing |
-| Storage and attachments | Path-policy contracts plus security tests | Add user-facing permission-error coverage |
+| Storage and attachments | Path-policy contracts plus security, deletion-failure, and retry tests | Exercise sandbox and external-volume permission failures manually |
 | Export rollback | Collision and cancellation tests require complete partial-directory removal | Add destination-selection GUI coverage if introduced |
 | Retry and recovery | Translation restart and recording finalisation tests | Keep retries explicit and bounded |
 | Bundle and DMG | Architecture, minimum OS, signature mode, entitlement, launch/relaunch, mounted layout, payload rejection, and draft asset checksum | Publish only a Developer ID signed and notarised draft; keep ad-hoc drafts for hands-on testing |
