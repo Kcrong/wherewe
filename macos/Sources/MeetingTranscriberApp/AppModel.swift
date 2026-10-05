@@ -606,40 +606,28 @@ final class AppModel: ObservableObject {
             let rows = try await api.documents(meetingID: meetingID)
             if selectedMeetingID == meetingID { documents = rows }
         } catch {
-            workspaceError = error.localizedDescription
+            if selectedMeetingID == meetingID { workspaceError = error.localizedDescription }
         }
     }
 
-    func uploadDocuments(_ urls: [URL]) async {
+    @discardableResult
+    func uploadDocuments(_ urls: [URL]) async -> [DocumentUploadResult] {
         guard let meetingID = loadedSelectedMeetingID,
               !fileOperationInProgress,
-              !databaseTransitionInProgress else { return }
+              !databaseTransitionInProgress else { return [] }
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
-        do {
-            for url in urls {
-                let data = try await Task.detached(priority: .userInitiated) {
-                    try Data(contentsOf: url, options: .mappedIfSafe)
-                }.value
-                guard data.count <= 5 * 1_024 * 1_024 else {
-                    throw WorkspaceValidationError.fileTooLarge(url.lastPathComponent)
-                }
-                guard ["pdf", "md", "txt", "html", "csv"].contains(url.pathExtension.lowercased()) else {
-                    throw WorkspaceValidationError.unsupportedFile(url.lastPathComponent)
-                }
-                guard loadedSelectedMeetingID == meetingID else { return }
-                _ = try await api.uploadDocument(
-                    meetingID: meetingID,
-                    name: url.lastPathComponent,
-                    data: data
-                )
-            }
-            guard loadedSelectedMeetingID == meetingID else { return }
-            await loadDocuments()
-        } catch {
-            workspaceError = error.localizedDescription
+
+        let results = await api.uploadDocuments(meetingID: meetingID, urls: urls)
+        guard loadedSelectedMeetingID == meetingID else { return results }
+
+        let failures = results.filter { !$0.succeeded }
+        if !failures.isEmpty {
+            workspaceError = failures.map(\.statusMessage).joined(separator: "\n")
         }
+        await loadDocuments()
+        return results
     }
 
     func previewDocument(_ document: UploadedDocument) async {
@@ -1482,20 +1470,6 @@ final class AppModel: ObservableObject {
 
 private struct NativeTranscriptionError: Decodable {
     let message: String?
-}
-
-private enum WorkspaceValidationError: LocalizedError {
-    case fileTooLarge(String)
-    case unsupportedFile(String)
-
-    var errorDescription: String? {
-        switch self {
-        case let .fileTooLarge(name):
-            return "\(name) is larger than the 5 MB upload limit."
-        case let .unsupportedFile(name):
-            return "\(name) is not PDF, Markdown, TXT, HTML, or CSV."
-        }
-    }
 }
 
 private enum MeetingDraftError: LocalizedError {
