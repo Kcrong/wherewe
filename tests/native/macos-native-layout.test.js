@@ -124,13 +124,16 @@ test("database changes clear and reload application state before mutations resum
   assert.ok(databaseUpdate < reloadCall);
 
   assert.match(clearState, /meetingLoadGeneration \+= 1/);
-  assert.match(clearState, /meetings = \[\][\s\S]*selectedMeetingID = nil[\s\S]*meetingDetail = nil/);
+  assert.match(
+    clearState,
+    /meetings = \[\][\s\S]*meetingSelection = MeetingSelectionState\(\)[\s\S]*meetingDetail = nil/
+  );
   assert.match(clearState, /meetingTitleDraft = ""[\s\S]*meetingContextDraft = ""/);
   assert.match(clearState, /transcriptStore = TranscriptStore\(\)[\s\S]*transcriptItems = \[\]/);
   assert.match(clearState, /documents = \[\][\s\S]*globalGlossary = \[\][\s\S]*meetingGlossary = \[\]/);
   assert.match(
     reloadState,
-    /meetings = try await api\.meetings\(\)[\s\S]*selectedMeetingID = meetings\.first\?\.id[\s\S]*await loadSelectedMeeting\(\)/
+    /meetings = try await api\.meetings\(\)[\s\S]*updateMeetingSelection\(meetings\.first\?\.id\)[\s\S]*await loadSelectedMeeting\(\)/
   );
   assert.match(model, /var canStartRecording:[\s\S]{0,220}!databaseTransitionInProgress/);
   assert.match(model, /func selectMeeting[\s\S]{0,140}!databaseTransitionInProgress/);
@@ -279,10 +282,15 @@ test("meeting selection clears stale state and fences meeting mutations", () => 
     );
   }
 
+  const uploadStart = model.indexOf("func uploadDocuments(");
+  const uploadEnd = model.indexOf("\n    func previewDocument(", uploadStart);
+  const uploadDocuments = model.slice(uploadStart, uploadEnd);
+  assert.ok(uploadStart >= 0 && uploadEnd > uploadStart, "missing uploadDocuments boundary");
+
   assert.match(model, /func deleteSelectedMeeting[\s\S]{0,900}api\.deleteMeeting[\s\S]{0,140}if selectedMeetingID == meetingID[\s\S]{0,100}updateMeetingSelection\(nil\)[\s\S]{0,180}if selectedMeetingID == nil/);
   assert.match(model, /func beginEditingSegment[\s\S]{0,140}loadedSelectedMeetingID == segment\.meetingID/);
   assert.match(model, /func previewDocument[\s\S]{0,220}let meetingID = loadedSelectedMeetingID[\s\S]{0,140}documents\.contains/);
-  assert.match(model, /func uploadDocuments[\s\S]{0,900}guard loadedSelectedMeetingID == meetingID else \{ return \}[\s\S]{0,140}api\.uploadDocument/);
+  assert.match(uploadDocuments, /guard loadedSelectedMeetingID == meetingID else \{ return \}[\s\S]*api\.uploadDocument/);
   assert.match(model, /func exportSelectedMeeting[\s\S]{0,260}api\.exportMeeting[\s\S]{0,140}guard loadedSelectedMeetingID == meetingID/);
   assert.match(model, /func deleteDocument[\s\S]{0,220}loadedSelectedMeetingID != nil[\s\S]{0,140}documents\.contains/);
   assert.match(model, /func deleteGlossaryEntry[\s\S]{0,260}loadedSelectedMeetingID == meetingID[\s\S]{0,120}meetingGlossary\.contains/);

@@ -336,11 +336,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectMeeting(_ id: Int?) {
-<<<<<<< HEAD
         guard recordingPhase == .idle, !databaseTransitionInProgress else { return }
-        selectedMeetingID = id
-=======
-        guard recordingPhase == .idle else { return }
         updateMeetingSelection(id)
     }
 
@@ -367,7 +363,6 @@ final class AppModel: ObservableObject {
         showingDeleteMeetingConfirmation = false
         meetingMutationError = nil
         workspaceError = nil
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
     }
 
     func refreshMeetings() async {
@@ -492,13 +487,9 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSelectedMeeting() async {
-<<<<<<< HEAD
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               !meetingMutationInProgress,
               !databaseTransitionInProgress else { return }
-=======
-        guard let meetingID = loadedSelectedMeetingID, !meetingMutationInProgress else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
         if recordingPhase == .recording { await stopRecording() }
         guard recordingPhase == .idle else {
             meetingMutationError = "Confirm recording finalisation before deleting this meeting."
@@ -523,13 +514,9 @@ final class AppModel: ObservableObject {
     }
 
     func changeTranslationTarget(_ target: String) async {
-<<<<<<< HEAD
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               recordingPhase == .idle,
               !databaseTransitionInProgress else { return }
-=======
-        guard let meetingID = loadedSelectedMeetingID, recordingPhase == .idle else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
         do {
             _ = try await api.updateTranslationTarget(meetingID: meetingID, target: target)
             await resyncTranscriptState()
@@ -560,11 +547,7 @@ final class AppModel: ObservableObject {
     }
 
     func saveSegmentEdit() async {
-<<<<<<< HEAD
-        guard let meetingID = selectedMeetingID, !databaseTransitionInProgress else { return }
-=======
-        guard let meetingID = loadedSelectedMeetingID else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
+        guard let meetingID = loadedSelectedMeetingID, !databaseTransitionInProgress else { return }
         let text = editingSegmentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         do {
@@ -591,11 +574,7 @@ final class AppModel: ObservableObject {
     }
 
     func retryTranslation(entityType: TranslationEntityType, entityID: Int) async {
-<<<<<<< HEAD
-        guard let meetingID = selectedMeetingID, !databaseTransitionInProgress else { return }
-=======
-        guard let meetingID = loadedSelectedMeetingID else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
+        guard let meetingID = loadedSelectedMeetingID, !databaseTransitionInProgress else { return }
         do {
             _ = try await api.retryTranslation(
                 meetingID: meetingID,
@@ -622,13 +601,9 @@ final class AppModel: ObservableObject {
     }
 
     func uploadDocuments(_ urls: [URL]) async {
-<<<<<<< HEAD
-        guard let meetingID = selectedMeetingID,
+        guard let meetingID = loadedSelectedMeetingID,
               !fileOperationInProgress,
               !databaseTransitionInProgress else { return }
-=======
-        guard let meetingID = loadedSelectedMeetingID, !fileOperationInProgress else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
@@ -680,13 +655,10 @@ final class AppModel: ObservableObject {
     }
 
     func deleteDocument(_ document: UploadedDocument) async {
-<<<<<<< HEAD
-        guard !fileOperationInProgress, !databaseTransitionInProgress else { return }
-=======
         guard loadedSelectedMeetingID != nil,
               documents.contains(where: { $0.id == document.id }),
-              !fileOperationInProgress else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
+              !fileOperationInProgress,
+              !databaseTransitionInProgress else { return }
         fileOperationInProgress = true
         workspaceError = nil
         defer { fileOperationInProgress = false }
@@ -780,15 +752,11 @@ final class AppModel: ObservableObject {
     }
 
     func deleteGlossaryEntry(_ entry: GlossaryEntry) async {
-<<<<<<< HEAD
-        guard !glossaryOperationInProgress, !databaseTransitionInProgress else { return }
-=======
         if let meetingID = entry.meetingID {
             guard loadedSelectedMeetingID == meetingID,
                   meetingGlossary.contains(where: { $0.id == entry.id }) else { return }
         }
-        guard !glossaryOperationInProgress else { return }
->>>>>>> 87b87f5 (fix(meetings): isolate state during selection changes)
+        guard !glossaryOperationInProgress, !databaseTransitionInProgress else { return }
         glossaryOperationInProgress = true
         workspaceError = nil
         defer { glossaryOperationInProgress = false }
@@ -1018,7 +986,7 @@ final class AppModel: ObservableObject {
     private func clearDatabaseBackedState() {
         meetingLoadGeneration += 1
         meetings = []
-        selectedMeetingID = nil
+        meetingSelection = MeetingSelectionState()
         meetingDetail = nil
         showingNewMeeting = false
         showingDeleteMeetingConfirmation = false
@@ -1057,7 +1025,7 @@ final class AppModel: ObservableObject {
     private func reloadDatabaseBackedState() async {
         do {
             meetings = try await api.meetings()
-            selectedMeetingID = meetings.first?.id
+            updateMeetingSelection(meetings.first?.id)
             await loadSelectedMeeting()
         } catch {
             workspaceError = error.localizedDescription
