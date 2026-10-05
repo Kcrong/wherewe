@@ -271,6 +271,7 @@ test("meeting selection clears stale state and fences meeting mutations", () => 
     );
   }
 
+  assert.match(model, /func deleteSelectedMeeting[\s\S]{0,900}api\.deleteMeeting[\s\S]{0,140}if selectedMeetingID == meetingID[\s\S]{0,100}updateMeetingSelection\(nil\)[\s\S]{0,180}if selectedMeetingID == nil/);
   assert.match(model, /func beginEditingSegment[\s\S]{0,140}loadedSelectedMeetingID == segment\.meetingID/);
   assert.match(model, /func previewDocument[\s\S]{0,220}let meetingID = loadedSelectedMeetingID[\s\S]{0,140}documents\.contains/);
   assert.match(model, /func uploadDocuments[\s\S]{0,900}guard loadedSelectedMeetingID == meetingID else \{ return \}[\s\S]{0,140}api\.uploadDocument/);

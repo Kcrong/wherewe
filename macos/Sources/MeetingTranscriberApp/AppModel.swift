@@ -510,9 +510,13 @@ final class AppModel: ObservableObject {
         defer { meetingMutationInProgress = false }
         do {
             _ = try await api.deleteMeeting(id: meetingID, socketID: realtime.clientID)
-            updateMeetingSelection(nil)
+            if selectedMeetingID == meetingID {
+                updateMeetingSelection(nil)
+            }
             await refreshMeetings()
-            updateMeetingSelection(meetings.first?.id)
+            if selectedMeetingID == nil {
+                updateMeetingSelection(meetings.first?.id)
+            }
         } catch {
             meetingMutationError = error.localizedDescription
         }
