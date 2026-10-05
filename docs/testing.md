@@ -5,8 +5,8 @@ proves. Source inventories are checked by `testing-strategy.test.js`.
 
 ## Current inventory
 
-- Swift test sources: 24 files, 21 suites, 73 declared tests.
-- Deterministic Swift baseline: 68 tests.
+- Swift test sources: 25 files, 22 suites, 75 declared tests.
+- Deterministic Swift baseline: 70 tests.
 - Opt-in Swift runtime and hardware checks: 5 tests across 3 environment keys.
 - Node source contracts: 13 files, 58 declared tests.
 - `MeetingTranscriberCoreChecks` is a separate executable smoke contract.
@@ -23,6 +23,7 @@ Node contracts, public-content scanner, JSON checks, and shell syntax checks.
 | `CaptureLevelMeterTests.swift` | Level mapping, cadence, and channel isolation |
 | `CaptureRegressionTests.swift` | Commit boundaries, input policy, deadlines, and spool ownership |
 | `CoreAudioInputPlanningTests.swift` | Microphone and system-input planning |
+| `DualInputSynchronizerTests.swift` | Input-loss silence synthesis, recovery, and bounded buffering |
 | `ExportFailureSecurityTests.swift` | Export rollback after collision or cancellation |
 | `HostTimeAudioResamplerTests.swift` | Sample-rate continuity and drift |
 | `LiveNativeServiceContractTests.swift` | Setup-required startup without an auxiliary runtime |
