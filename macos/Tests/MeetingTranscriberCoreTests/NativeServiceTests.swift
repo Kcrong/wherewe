@@ -851,7 +851,7 @@ struct NativeServiceTests {
             maximumSpoolBytes: maximumSpoolBytes
         )
         let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
-        _ = try await coordinator.start(
+        let claim = try await coordinator.start(
             meetingID: meeting.id,
             language: "en-US",
             translationTarget: "ko",
@@ -883,17 +883,25 @@ struct NativeServiceTests {
         #expect(spoolFiles.count == 1)
         let spoolFile = try #require(spoolFiles.first)
         let spoolBytes = try #require(spoolFile.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let expectedAudioBytes = 450 * 800 * MemoryLayout<Int16>.size
         #expect(spoolBytes <= maximumSpoolBytes)
-        #expect(spoolBytes < 450 * 800 * MemoryLayout<Int16>.size)
+        #expect(spoolBytes < expectedAudioBytes)
 
-        _ = try await coordinator.stop()
+        let barrier = try await realtime.audioBarrier(
+            meetingID: meeting.id,
+            generation: claim.generation
+        )
+        #expect(barrier.success)
+        #expect(barrier.audioByteCount == expectedAudioBytes)
+        let outcome = try await coordinator.stop()
+        #expect(outcome.audioDeliveryConfirmed)
         let transcripts = try await service.meeting(id: meeting.id).transcripts
         #expect(transcripts.count >= 4)
         #expect(Set(transcripts.compactMap(\.resultID)).count == transcripts.count)
         await coordinator.close()
     }
 
-    @Test("recording spool rejects audio before exceeding its safety limit")
+    @Test("recording spool rejects audio and keeps delivery unconfirmed at its safety limit")
     func recordingSpoolLimit() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -911,25 +919,29 @@ struct NativeServiceTests {
             maximumSpoolBytes: maximumSpoolBytes
         )
         let coordinator = RecordingCoordinator(api: service, realtime: realtime, readyTimeout: .seconds(2))
-        _ = try await coordinator.start(
+        let claim = try await coordinator.start(
             meetingID: meeting.id,
             language: "en-US",
             translationTarget: "ko",
             sampleRate: 8_000,
             channelCount: 1
         )
+        let expectedFailure = NativeServiceError.server(
+            status: 507,
+            code: "AUDIO_SPOOL_LIMIT",
+            message: "Recording audio storage reached its safety limit. Stop and finish the recording before continuing."
+        )
 
         for _ in 0..<2 {
-            do {
+            await #expect(throws: RecordingCoordinatorError.audioDeliveryFailed) {
                 try await coordinator.sendPCM([Int16](repeating: 1, count: 800))
-                Issue.record("audio beyond the spool limit must be rejected")
-            } catch let error as NativeServiceError {
-                #expect(error == .server(
-                    status: 507,
-                    code: "AUDIO_SPOOL_LIMIT",
-                    message: "Recording audio storage reached its safety limit. Stop and finish the recording before continuing."
-                ))
             }
+        }
+        await #expect(throws: expectedFailure) {
+            _ = try await realtime.audioBarrier(
+                meetingID: meeting.id,
+                generation: claim.generation
+            )
         }
         let spoolFiles = try FileManager.default.contentsOfDirectory(
             at: spoolWorkspace.directory,
@@ -939,7 +951,13 @@ struct NativeServiceTests {
         let spoolFile = try #require(spoolFiles.first)
         #expect(try spoolFile.resourceValues(forKeys: [.fileSizeKey]).fileSize == 0)
 
-        _ = try await coordinator.stop()
+        await #expect(throws: RecordingCoordinatorError.audioDeliveryFailed) {
+            _ = try await coordinator.stop()
+        }
+        #expect(await coordinator.state == .recoveryRequired(claim))
+        let unfinished = try await service.meeting(id: meeting.id)
+        #expect(unfinished.endedAt == nil)
+        #expect(unfinished.transcripts.isEmpty)
         await coordinator.close()
     }
 

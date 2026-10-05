@@ -63,6 +63,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         var handle: FileHandle
         var resultIDs: [String]
         var byteCount = 0
+        var totalAcceptedByteCount = 0
         var processedByteCount = 0
         var lastPreviewByteCount = 0
         var previewInFlight = false
@@ -253,6 +254,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
             }
             try session.handle.write(contentsOf: data)
             session.byteCount += data.count
+            session.totalAcceptedByteCount += data.count
             let bytesPerSecond = max(1, Int(session.request.sampleRate) * session.request.channelCount * 2)
             let previewThreshold = bytesPerSecond * 2
             let commitThreshold = bytesPerSecond * 10
@@ -297,14 +299,33 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
         meetingID: Int,
         generation: Int64
     ) async throws -> RealtimeAcknowledgement {
-        let byteCounts = try withLock { () -> (tracked: Int, stored: Int)? in
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while try withLock({ () throws -> Bool in
+            guard let session = audioSession,
+                  session.request.meetingID == meetingID,
+                  session.request.generation == generation else { return false }
+            if let spoolFailure = session.spoolFailure { throw spoolFailure }
+            return session.previewInFlight
+        }), clock.now < deadline {
+            try await clock.sleep(for: .milliseconds(25))
+        }
+        let byteCounts = try withLock { () -> (currentTracked: Int, currentStored: Int, totalAccepted: Int)? in
             guard let session = audioSession,
                   session.request.meetingID == meetingID,
                   session.request.generation == generation else { return nil }
+            if let spoolFailure = session.spoolFailure { throw spoolFailure }
+            guard !session.previewInFlight else {
+                throw RealtimeClientError.acknowledgementTimedOut
+            }
             try session.handle.synchronize()
-            return (session.byteCount, Int(try session.handle.offset()))
+            return (
+                currentTracked: session.byteCount,
+                currentStored: Int(try session.handle.offset()),
+                totalAccepted: session.totalAcceptedByteCount
+            )
         }
-        let matches = byteCounts.map { $0.tracked == $0.stored } ?? false
+        let matches = byteCounts.map { $0.currentTracked == $0.currentStored } ?? false
         let code: String? = if matches {
             nil
         } else if byteCounts == nil {
@@ -317,7 +338,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
             code: code,
             meetingID: meetingID,
             generation: generation,
-            audioByteCount: byteCounts?.stored
+            audioByteCount: byteCounts?.totalAccepted
         )
     }
 
@@ -357,6 +378,7 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
                 generation: generation
             )
         }
+        if let spoolFailure = session.spoolFailure { throw spoolFailure }
         cancelPreviewTasks(for: session.id)
         cancelPreparationTasks(for: session.id)
         try session.handle.synchronize()
@@ -508,6 +530,13 @@ public final class NativeRealtimeClient: RealtimeServing, @unchecked Sendable {
             do {
                 try replacement.handle.write(contentsOf: pending)
                 try replacement.handle.synchronize()
+                guard Int(try replacement.handle.offset()) == pending.count else {
+                    throw NativeServiceError.server(
+                        status: 500,
+                        code: "AUDIO_SPOOL_WRITE_FAILED",
+                        message: "Recording audio could not be written to temporary storage."
+                    )
+                }
                 try FileManager.default.removeItem(at: current.url)
             } catch {
                 try? replacement.handle.close()
