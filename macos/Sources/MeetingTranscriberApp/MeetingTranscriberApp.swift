@@ -181,7 +181,21 @@ private struct RootView: View {
             .accessibilityIdentifier("setup-required")
         case .ready:
             if let meeting = model.selectedMeeting {
-                MeetingDetailView(model: model, meeting: meeting)
+                if model.selectedMeetingIsLoaded {
+                    MeetingDetailView(model: model, meeting: meeting)
+                } else if let message = model.workspaceError {
+                    EmptyStateView(
+                        title: "Meeting Unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        message: message,
+                        actionTitle: "Retry",
+                        action: { Task { await model.loadSelectedMeeting() } }
+                    )
+                } else {
+                    ProgressView("Loading meeting…")
+                        .controlSize(.large)
+                        .accessibilityIdentifier("meeting-loading")
+                }
             } else {
                 EmptyStateView(
                     title: "Select a Meeting",

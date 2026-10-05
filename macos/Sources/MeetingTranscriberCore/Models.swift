@@ -109,3 +109,33 @@ public enum NativeServiceContractError: Error, Equatable, LocalizedError, Sendab
         }
     }
 }
+
+package struct MeetingSelectionState: Equatable, Sendable {
+    package private(set) var selectedID: Int?
+    package private(set) var loadedID: Int?
+
+    @discardableResult
+    package mutating func select(_ id: Int?) -> Bool {
+        guard selectedID != id else { return false }
+        selectedID = id
+        loadedID = nil
+        return true
+    }
+
+    package mutating func beginLoading() -> Int? {
+        loadedID = nil
+        return selectedID
+    }
+
+    @discardableResult
+    package mutating func finishLoading(_ id: Int) -> Bool {
+        guard selectedID == id else { return false }
+        loadedID = id
+        return true
+    }
+
+    package var mutationID: Int? {
+        guard let selectedID, loadedID == selectedID else { return nil }
+        return selectedID
+    }
+}
