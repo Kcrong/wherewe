@@ -314,7 +314,10 @@ test("meeting selection clears stale state and fences meeting mutations", () => 
   assert.match(model, /func deleteSelectedMeeting[\s\S]{0,900}api\.deleteMeeting[\s\S]{0,140}if selectedMeetingID == meetingID[\s\S]{0,100}updateMeetingSelection\(nil\)[\s\S]{0,180}if selectedMeetingID == nil/);
   assert.match(model, /func beginEditingSegment[\s\S]{0,140}loadedSelectedMeetingID == segment\.meetingID/);
   assert.match(model, /func previewDocument[\s\S]{0,220}let meetingID = loadedSelectedMeetingID[\s\S]{0,140}documents\.contains/);
-  assert.match(uploadDocuments, /guard loadedSelectedMeetingID == meetingID else \{ return \}[\s\S]*api\.uploadDocument/);
+  assert.match(
+    uploadDocuments,
+    /api\.uploadDocuments\(meetingID: meetingID, urls: urls\)[\s\S]{0,140}guard loadedSelectedMeetingID == meetingID else \{ return results \}/
+  );
   assert.match(model, /func exportSelectedMeeting[\s\S]{0,260}api\.exportMeeting[\s\S]{0,140}guard loadedSelectedMeetingID == meetingID/);
   assert.match(model, /func deleteDocument[\s\S]{0,220}loadedSelectedMeetingID != nil[\s\S]{0,140}documents\.contains/);
   assert.match(model, /func deleteGlossaryEntry[\s\S]{0,260}loadedSelectedMeetingID == meetingID[\s\S]{0,120}meetingGlossary\.contains/);
@@ -343,14 +346,39 @@ test("live transcript follows the bottom until the user scrolls away", () => {
 });
 
 test("attachments glossary and export remain local UI surfaces", () => {
+  const uploadStart = model.indexOf("func uploadDocuments(_ urls: [URL]) async -> [DocumentUploadResult] {");
+  const uploadEnd = model.indexOf("\n    func previewDocument", uploadStart);
+  assert.notEqual(uploadStart, -1, "missing uploadDocuments");
+  assert.ok(uploadEnd > uploadStart, "missing uploadDocuments boundary");
+  const uploadDocuments = model.slice(uploadStart, uploadEnd);
+
   assert.match(view, /private struct FilesPane/);
   assert.match(view, /private struct DocumentPreviewView/);
   assert.match(view, /private struct GlossaryPane/);
   assert.match(view, /private struct ExportPane/);
-  assert.match(model, /api\.uploadDocument\(/);
+  assert.match(model, /api\.uploadDocuments\(/);
   assert.match(model, /api\.createGlossary\(/);
   assert.match(model, /api\.exportMeeting\(/);
   assert.match(model, /api\.reveal\(/);
+  const uploadCall = uploadDocuments.indexOf(
+    "let results = await api.uploadDocuments(meetingID: meetingID, urls: urls)"
+  );
+  const selectionRecheck = uploadDocuments.indexOf(
+    "guard loadedSelectedMeetingID == meetingID else { return results }"
+  );
+  const failurePublish = uploadDocuments.indexOf("let failures = results.filter");
+  const documentRefresh = uploadDocuments.indexOf("await loadDocuments()");
+
+  assert.match(
+    uploadDocuments,
+    /guard let meetingID = loadedSelectedMeetingID,[\s\S]{0,120}!fileOperationInProgress,[\s\S]{0,80}!databaseTransitionInProgress/
+  );
+  assert.ok(uploadCall >= 0, "multi-file upload must use the captured loaded meeting");
+  assert.ok(selectionRecheck > uploadCall, "selection must be revalidated after the upload batch");
+  assert.ok(failurePublish > selectionRecheck, "failures must not publish for a stale selection");
+  assert.ok(documentRefresh > failurePublish, "documents must refresh after partial results are published");
+  assert.match(uploadDocuments, /workspaceError = failures[\s\S]{0,160}await loadDocuments\(\)/);
+  assert.doesNotMatch(uploadDocuments, /for url in urls/);
 });
 
 test("native layout keeps adaptive system controls", () => {

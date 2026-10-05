@@ -56,6 +56,77 @@ public extension NativeServiceServing {
     }
 }
 
+package struct DocumentUploadResult: Equatable, Identifiable, Sendable {
+    package enum Outcome: Equatable, Sendable {
+        case uploaded(UploadResponse)
+        case failed(String)
+    }
+
+    package let id: Int
+    package let name: String
+    package let outcome: Outcome
+
+    package var succeeded: Bool {
+        if case .uploaded = outcome { return true }
+        return false
+    }
+
+    package var statusMessage: String {
+        switch outcome {
+        case .uploaded:
+            "Uploaded \(name)."
+        case let .failed(message):
+            "\(name) failed: \(message)"
+        }
+    }
+}
+
+extension NativeServiceServing {
+    package func uploadDocuments(meetingID: Int, urls: [URL]) async -> [DocumentUploadResult] {
+        var results: [DocumentUploadResult] = []
+        results.reserveCapacity(urls.count)
+
+        for (index, url) in urls.enumerated() {
+            let name = url.lastPathComponent
+            do {
+                let data = try await Task.detached(priority: .userInitiated) {
+                    try Data(contentsOf: url, options: .mappedIfSafe)
+                }.value
+                guard data.count <= 5 * 1_024 * 1_024 else {
+                    throw DocumentUploadValidationError.fileTooLarge(name)
+                }
+                guard ["pdf", "md", "txt", "html", "csv"].contains(url.pathExtension.lowercased()) else {
+                    throw DocumentUploadValidationError.unsupportedFile(name)
+                }
+                let response = try await uploadDocument(meetingID: meetingID, name: name, data: data)
+                results.append(DocumentUploadResult(id: index, name: name, outcome: .uploaded(response)))
+            } catch {
+                results.append(DocumentUploadResult(
+                    id: index,
+                    name: name,
+                    outcome: .failed(error.localizedDescription)
+                ))
+            }
+        }
+
+        return results
+    }
+}
+
+private enum DocumentUploadValidationError: LocalizedError {
+    case fileTooLarge(String)
+    case unsupportedFile(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .fileTooLarge(name):
+            "\(name) is larger than the 5 MB upload limit."
+        case let .unsupportedFile(name):
+            "\(name) is not PDF, Markdown, TXT, HTML, or CSV."
+        }
+    }
+}
+
 public enum NativeServiceError: Error, Equatable, LocalizedError, Sendable {
     case server(status: Int, code: String?, message: String?)
     case encoding

@@ -632,6 +632,37 @@ struct NativeServiceTests {
         #expect(try await service.deleteGlossary(id: unrelatedTerm.id).success)
     }
 
+    @Test("multi-file uploads report every result and preserve partial success")
+    func partialDocumentUploadResults() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let service = makeTestService(configuration: fixture.configuration)
+        try await fixture.configure(service)
+        let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Partial upload"))
+
+        let firstURL = fixture.root.appendingPathComponent("first.txt")
+        let rejectedURL = fixture.root.appendingPathComponent("rejected.exe")
+        let lastURL = fixture.root.appendingPathComponent("last.md")
+        try Data("first".utf8).write(to: firstURL)
+        try Data("rejected".utf8).write(to: rejectedURL)
+        try Data("last".utf8).write(to: lastURL)
+
+        let results = await service.uploadDocuments(
+            meetingID: meeting.id,
+            urls: [firstURL, rejectedURL, lastURL]
+        )
+
+        #expect(results.map(\.id) == [0, 1, 2])
+        #expect(results.map(\.name) == ["first.txt", "rejected.exe", "last.md"])
+        #expect(results.map(\.succeeded) == [true, false, true])
+        #expect(results.map(\.statusMessage) == [
+            "Uploaded first.txt.",
+            "rejected.exe failed: rejected.exe is not PDF, Markdown, TXT, HTML, or CSV.",
+            "Uploaded last.md.",
+        ])
+        #expect(try await service.documents(meetingID: meeting.id).map(\.name) == ["first.txt", "last.md"])
+    }
+
     @Test("recording persists Apple transcription and translation metadata")
     func nativeRecordingRoundTrip() async throws {
         let fixture = try Fixture()
