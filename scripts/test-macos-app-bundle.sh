@@ -6,10 +6,28 @@ APP_PATH="${WHEREWE_NATIVE_APP_PATH:-${WHEREWE_NATIVE_DIST_DIR:-$ROOT_DIR/dist/m
 APP_BINARY="$APP_PATH/Contents/MacOS/Wherewe"
 SMOKE_ROOT="${WHEREWE_NATIVE_SMOKE_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/wherewe-native-smoke.XXXXXX")}"
 APP_PID=""
+LAUNCH_PID=""
+LAUNCH_MODE="${WHEREWE_NATIVE_LAUNCH_MODE:-direct}"
+
+case "$LAUNCH_MODE" in
+  direct|launchservices) ;;
+  *)
+    printf 'Unsupported native app launch mode: %s\n' "$LAUNCH_MODE" >&2
+    exit 1
+    ;;
+esac
+
+running_app_pids() {
+  /bin/ps -axo pid=,command= \
+    | /usr/bin/awk -v binary="$APP_BINARY" '$2 == binary { print $1 }'
+}
 
 teardown() {
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill -TERM "$APP_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
+    kill -TERM "$LAUNCH_PID" 2>/dev/null || true
   fi
 }
 trap teardown EXIT INT TERM
@@ -81,18 +99,47 @@ JSON
 chmod 600 "$CONFIG"
 
 launch_app() {
-  WHEREWE_CONFIG_PATH="$CONFIG" \
-  WHEREWE_DEFAULT_DATA_ROOT="$SUPPORT" \
-  WHEREWE_SUPPRESS_OPEN=1 \
-  TMPDIR="$SMOKE_ROOT/runtime-tmp" \
-  "$APP_BINARY" >"$SMOKE_ROOT/app.log" 2>&1 &
-  APP_PID=$!
+  local pids
+  : > "$SMOKE_ROOT/app.log"
+  if [[ "$LAUNCH_MODE" == "launchservices" ]]; then
+    WHEREWE_CONFIG_PATH="$CONFIG" \
+    WHEREWE_DEFAULT_DATA_ROOT="$SUPPORT" \
+    WHEREWE_SUPPRESS_OPEN=1 \
+    TMPDIR="$SMOKE_ROOT/runtime-tmp" \
+    /usr/bin/open -n -W "$APP_PATH" >"$SMOKE_ROOT/app.log" 2>&1 &
+    LAUNCH_PID=$!
+  else
+    WHEREWE_CONFIG_PATH="$CONFIG" \
+    WHEREWE_DEFAULT_DATA_ROOT="$SUPPORT" \
+    WHEREWE_SUPPRESS_OPEN=1 \
+    TMPDIR="$SMOKE_ROOT/runtime-tmp" \
+    "$APP_BINARY" >"$SMOKE_ROOT/app.log" 2>&1 &
+    APP_PID=$!
+  fi
+
   for _ in $(seq 1 200); do
-    [[ -f "$SUPPORT/data/meetings.db" ]] && return 0
-    kill -0 "$APP_PID" 2>/dev/null || {
+    if [[ "$LAUNCH_MODE" == "launchservices" ]]; then
+      pids="$(running_app_pids)"
+      if [[ -n "$pids" ]]; then
+        if [[ "$pids" == *$'\n'* ]]; then
+          printf 'LaunchServices started multiple native app processes: %s\n' "$pids" >&2
+          return 1
+        fi
+        APP_PID="$pids"
+      fi
+      kill -0 "$LAUNCH_PID" 2>/dev/null || {
+        cat "$SMOKE_ROOT/app.log" >&2
+        return 1
+      }
+    fi
+    if [[ -n "$APP_PID" && -f "$SUPPORT/data/meetings.db" ]] \
+      && kill -0 "$APP_PID" 2>/dev/null; then
+      return 0
+    fi
+    if [[ "$LAUNCH_MODE" == "direct" ]] && ! kill -0 "$APP_PID" 2>/dev/null; then
       cat "$SMOKE_ROOT/app.log" >&2
       return 1
-    }
+    fi
     sleep 0.05
   done
   cat "$SMOKE_ROOT/app.log" >&2
@@ -107,7 +154,20 @@ stop_app() {
     return 1
   }
   kill -TERM "$APP_PID"
-  wait "$APP_PID" 2>/dev/null || true
+  if [[ "$LAUNCH_MODE" == "launchservices" ]]; then
+    for _ in $(seq 1 200); do
+      kill -0 "$APP_PID" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 "$APP_PID" 2>/dev/null; then
+      printf 'LaunchServices app did not terminate within 10 seconds.\n' >&2
+      return 1
+    fi
+    wait "$LAUNCH_PID" 2>/dev/null || true
+    LAUNCH_PID=""
+  else
+    wait "$APP_PID" 2>/dev/null || true
+  fi
   APP_PID=""
 }
 
@@ -119,4 +179,4 @@ stop_app
 launch_app
 stop_app
 
-printf 'Native app smoke passed (macOS 26 ARM64, Apple system frameworks, no embedded framework/model/helper payload, no child process).\n'
+printf 'Native app smoke passed (macOS 26 ARM64, Apple system frameworks, no embedded framework/model/helper payload, no child process, %s launch).\n' "$LAUNCH_MODE"

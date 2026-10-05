@@ -226,6 +226,47 @@ jobs:
           /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=4 "$WHEREWE_DMG_PATH"
           bash scripts/test-macos-dmg.sh
 
+      - name: Validate installed app
+        if: steps.release-mode.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          [[ -n "${RUNNER_TEMP:-}" && -d "$RUNNER_TEMP" ]] || {
+            echo 'RUNNER_TEMP must identify an existing isolated directory.' >&2
+            exit 1
+          }
+          MOUNT_POINT="$RUNNER_TEMP/notarized-dmg-mount"
+          INSTALL_ROOT="$RUNNER_TEMP/notarized-app-install"
+          SMOKE_ROOT="$RUNNER_TEMP/notarized-app-smoke"
+          INSTALLED_APP="$INSTALL_ROOT/Wherewe.app"
+          teardown() {
+            /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
+            /bin/rm -rf "$MOUNT_POINT" "$INSTALL_ROOT" "$SMOKE_ROOT"
+          }
+          for path in "$MOUNT_POINT" "$INSTALL_ROOT" "$SMOKE_ROOT"; do
+            [[ ! -e "$path" ]] || {
+              echo "Refusing to reuse installed-app validation path: $path" >&2
+              exit 1
+            }
+          done
+          trap teardown EXIT INT TERM
+          mkdir -p "$MOUNT_POINT" "$INSTALL_ROOT"
+          /usr/bin/hdiutil attach "$WHEREWE_DMG_PATH" \
+            -readonly \
+            -nobrowse \
+            -mountpoint "$MOUNT_POINT" \
+            -quiet
+          [[ -d "$MOUNT_POINT/Wherewe.app" ]] || {
+            echo 'Mounted notarized DMG does not contain Wherewe.app.' >&2
+            exit 1
+          }
+          /usr/bin/ditto "$MOUNT_POINT/Wherewe.app" "$INSTALLED_APP"
+          /usr/bin/hdiutil detach "$MOUNT_POINT" -quiet
+          /usr/sbin/spctl --assess --type execute --verbose=4 "$INSTALLED_APP"
+          WHEREWE_NATIVE_APP_PATH="$INSTALLED_APP" \
+          WHEREWE_NATIVE_SMOKE_ROOT="$SMOKE_ROOT" \
+          WHEREWE_NATIVE_LAUNCH_MODE=launchservices \
+            bash scripts/test-macos-app-bundle.sh
+
       - name: Create SHA-256 checksum
         run: |
           cd "$WHEREWE_DMG_OUTPUT_DIR"
