@@ -470,6 +470,51 @@ struct NativeServiceTests {
         #expect(try await restarted.meetings().isEmpty)
     }
 
+    @Test("invalid database changes keep saved settings and the active database")
+    func invalidDatabaseSettingsChanges() async throws {
+        func verify(importing: Bool) async throws {
+            let fixture = try Fixture()
+            defer { fixture.remove() }
+            let service = makeTestService(configuration: fixture.configuration)
+            try await fixture.configure(service)
+            let meeting = try await service.createMeeting(CreateMeetingRequest(title: "Original database meeting"))
+            let original = try await service.settings()
+            let savedData = try Data(contentsOf: fixture.configURL)
+
+            let replacementRoot = fixture.root.appendingPathComponent(
+                importing ? "invalid-import" : "invalid-update",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: replacementRoot, withIntermediateDirectories: true)
+            let invalidDatabase = replacementRoot.appendingPathComponent("meetings.db")
+            try Data("not-a-sqlite-database".utf8).write(to: invalidDatabase)
+            var replacement = original.document.updateRequest
+            replacement.paths.database = invalidDatabase.path
+            replacement.paths.files = replacementRoot.appendingPathComponent("files", isDirectory: true).path
+
+            await #expect(throws: NativeSQLiteError.self) {
+                if importing {
+                    _ = try await service.importSettings(
+                        JSONEncoder().encode(replacement),
+                        etag: original.etag
+                    )
+                } else {
+                    _ = try await service.updateSettings(replacement, etag: original.etag)
+                }
+            }
+
+            #expect(try Data(contentsOf: fixture.configURL) == savedData)
+            #expect(try await service.settings() == original)
+            #expect(try await service.meetings().map(\.id) == [meeting.id])
+            let restarted = makeTestService(configuration: fixture.configuration)
+            #expect(try await restarted.health().state == .ready)
+            #expect(try await restarted.meetings().map(\.id) == [meeting.id])
+        }
+
+        try await verify(importing: false)
+        try await verify(importing: true)
+    }
+
     @Test("stale settings ETag is rejected")
     func staleSettingsRevision() async throws {
         let fixture = try Fixture()

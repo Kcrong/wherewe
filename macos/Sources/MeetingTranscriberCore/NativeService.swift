@@ -79,13 +79,6 @@ public actor NativeService: NativeServiceServing {
         return databaseStorage
     }
 
-    func replaceDatabase(for document: SettingsDocument) throws {
-        databaseStorage = try NativeDatabase(
-            url: URL(fileURLWithPath: document.paths.database),
-            fileManager: fileManager
-        )
-    }
-
     public func shutdown() async {
         recordingClaim = nil
         connectedClientIDs.removeAll()

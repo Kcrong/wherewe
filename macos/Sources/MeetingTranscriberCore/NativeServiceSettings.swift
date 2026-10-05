@@ -28,10 +28,7 @@ extension NativeService {
                 message: "Stop recording or wait for recording startup to finish before importing settings."
             )
         }
-        let envelope = try settingsStore.importData(data, etag: etag)
-        try replaceDatabase(for: envelope.document)
-        startupError = nil
-        return envelope
+        return try activateSettings(settingsStore.prepareImport(data, etag: etag))
     }
 
     public func updateSettings(
@@ -55,8 +52,16 @@ extension NativeService {
                 )
             }
         }
-        let envelope = try settingsStore.update(request, etag: etag)
-        try replaceDatabase(for: envelope.document)
+        return try activateSettings(settingsStore.prepareUpdate(request, etag: etag))
+    }
+
+    private func activateSettings(_ prepared: NativeSettingsStore.PreparedUpdate) throws -> SettingsEnvelope {
+        let candidate = try NativeDatabase(
+            url: URL(fileURLWithPath: prepared.document.paths.database),
+            fileManager: fileManager
+        )
+        let envelope = try settingsStore.commit(prepared)
+        databaseStorage = candidate
         startupError = nil
         return envelope
     }
