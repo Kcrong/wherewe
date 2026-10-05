@@ -198,7 +198,7 @@ private final class RemovalFailingFileManager: FileManager, @unchecked Sendable 
         let shouldFail = failedRemovalPaths.contains(url.standardizedFileURL.path)
         failureLock.unlock()
         if shouldFail {
-            throw CocoaError(.fileWriteNoPermission, url: url)
+            throw CocoaError(.fileWriteNoPermission)
         }
         try super.removeItem(at: url)
     }
