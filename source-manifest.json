@@ -2,7 +2,7 @@
   "schema_version": 1,
   "purpose": "Classify every source-controlled Wherewe file and reject unlisted, sensitive, local, or generated content.",
   "generated_on": "2026-10-05",
-  "expected_files": 106,
+  "expected_files": 107,
   "default_file_mode": "100644",
   "files": [
     ".github/workflows/release-macos.yml",
@@ -88,6 +88,7 @@
     "macos/Tests/MeetingTranscriberCoreTests/StoragePathSecurityTests.swift",
     "macos/Tests/MeetingTranscriberCoreTests/SyntheticSpeechFixture.swift",
     "macos/Tests/MeetingTranscriberCoreTests/TranslationRetryRecoveryTests.swift",
+    "macos/Tests/MeetingTranscriberCoreTests/TranslationStalenessTests.swift",
     "macos/contract.json",
     "scripts/build-macos-app.sh",
     "scripts/build-macos-dmg.sh",
